@@ -1477,6 +1477,55 @@ class ScanWindow(tk.Toplevel):
         parts = [p.strip() for p in raw.split(",") if p.strip()]
         return parts if parts else ["*.java"]
 
+    def _scan_counts(self) -> dict:
+        total_folders = len(self.folder_order)
+        total_files = 0
+        blank_folders = 0
+        total_students = 0
+        included_rows = 0
+        included_students = 0
+
+        for folder_key in self.folder_order:
+            r = self.rows.get(folder_key, {})
+            files = r.get("files") or []
+            nfiles = len(files)
+            total_files += nfiles
+            if nfiles == 0:
+                blank_folders += 1
+
+            is_student = has_required_student_fields(r.get("final_id", ""), r.get("final_name", ""))
+            if is_student:
+                total_students += 1
+
+            if r.get("include"):
+                included_rows += 1
+                if is_student:
+                    included_students += 1
+
+        return {
+            "folders": total_folders,
+            "files": total_files,
+            "blank_folders": blank_folders,
+            "total_students": total_students,
+            "included_rows": included_rows,
+            "included_students": included_students,
+        }
+
+    def _set_scan_status(self, prefix: str = ""):
+        c = self._scan_counts()
+        parts = [
+            f"Folders: {c['folders']}",
+            f"Files: {c['files']}",
+            f"Total students: {c['total_students']}",
+            f"Included rows: {c['included_rows']}",
+            f"Included students: {c['included_students']}",
+            f"Blank folders: {c['blank_folders']}",
+        ]
+        msg = " | ".join(parts)
+        if prefix:
+            msg = f"{prefix} | {msg}"
+        self.status_lbl.config(text=msg)
+
     def reset_regex_defaults(self):
         self.file_globs_var.set("*.java")
         self.filename_regex_var.set("")
@@ -1676,10 +1725,6 @@ class ScanWindow(tk.Toplevel):
             final_id, final_name, det_id, det_name, files = scanner.detect_folder(sub)
             if existing_files:
                 files = [fp for fp in files if fp not in existing_files]
-            if not files:
-                blank_folders += 1
-
-            total_files += len(files)
             folder_key = str(sub)
             self.folder_order.append(folder_key)
             include_row = bool(files)
@@ -1755,13 +1800,18 @@ class ScanWindow(tk.Toplevel):
         folder_key = self.sel_folder_var.get().strip()
         if not folder_key or folder_key not in self.rows:
             return
-        if not self.rows[folder_key].get("files"):
-            self.rows[folder_key]["include"] = False
+        row = self.rows[folder_key]
+        files = row.get("files") or []
+        is_student = has_required_student_fields(row.get("final_id", ""), row.get("final_name", ""))
+        if not files or not is_student:
+            row["include"] = False
             self.include_var.set(False)
             self._refresh_tree_row(folder_key)
+            self._set_scan_status(prefix="Scan info")
             return
-        self.rows[folder_key]["include"] = bool(self.include_var.get())
+        row["include"] = bool(self.include_var.get())
         self._refresh_tree_row(folder_key)
+        self._set_scan_status(prefix="Scan info")
 
     def apply_edits(self):
         folder_key = self.sel_folder_var.get().strip()
@@ -1773,15 +1823,23 @@ class ScanWindow(tk.Toplevel):
         fname = self.final_name_var.get().strip()
         lab = self.lab_id_var.get().strip()
 
-        if not fid and raw_fid.startswith("NAME:"):
-            fid = raw_fid
-        elif not fid and fname:
-            fid = f"NAME:{fname}"
-
         self.rows[folder_key]["final_id"] = fid
         self.rows[folder_key]["final_name"] = fname
         self.rows[folder_key]["lab_id"] = lab
+
+        is_student = has_required_student_fields(fid, fname)
+        has_files = bool(self.rows[folder_key].get("files"))
+        self.rows[folder_key]["include"] = bool(self.rows[folder_key].get("include")) and has_files and is_student
+        if is_student and has_files:
+            # If user just completed ID + Name, include it by default.
+            self.rows[folder_key]["include"] = True
+
+        self._suspend_auto_apply = True
+        self.include_var.set(bool(self.rows[folder_key]["include"]))
+        self._suspend_auto_apply = False
+
         self._refresh_tree_row(folder_key)
+        self._set_scan_status(prefix="Scan info")
 
     def _refresh_tree_row(self, folder_key: str):
         r = self.rows[folder_key]
@@ -1810,6 +1868,8 @@ class ScanWindow(tk.Toplevel):
             self._suspend_auto_apply = True
             self.lab_id_var.set(self.rows[current].get("lab_id", ""))
             self._suspend_auto_apply = False
+
+        self._set_scan_status(prefix="Scan info")
 
     def _selected_preview_text(self) -> str:
         try:
