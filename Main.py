@@ -77,7 +77,7 @@ SUBMISSIONS_DB = "submissions.sqlite"
 DEFAULT_THEME = "Grade strictly. If unclear, give 0 and explain why."
 
 # Per your request: keep model/AI plumbing separate; leave default empty/off.
-DEFAULT_AI_ENABLED = False
+DEFAULT_AI_ENABLED = True
 
 ID_DIGITS_RE = re.compile(r"\b\d{5,12}\b")
 
@@ -1075,8 +1075,25 @@ class AutoGrader:
         """
         if not self.enabled:
             raise RuntimeError("AutoGrader is disabled (optional component).")
-        # Placeholder: implement later
-        return {"scores": [], "rationale": ""}
+
+        scores = []
+        for item in (rubric_items or []):
+            col_key = item.get("col_key")
+            if not col_key:
+                continue
+            max_points = float(item.get("max_points", 0.0) or 0.0)
+            pts = random.uniform(0.0, max_points) if max_points > 0 else 0.0
+            pts = round(pts, 2)
+            scores.append({
+                "col_key": col_key,
+                "points": pts,
+                "note": "Auto draft (random in range).",
+            })
+
+        return {
+            "scores": scores,
+            "rationale": "Auto-generated draft scores (randomized within each rubric max). Please review.",
+        }
 
 
 # =============================================================================
@@ -1468,6 +1485,11 @@ class ScanWindow(tk.Toplevel):
         folder_key = self.sel_folder_var.get().strip()
         if not folder_key or folder_key not in self.rows:
             return
+        if not self.rows[folder_key].get("files"):
+            self.rows[folder_key]["include"] = False
+            self.include_var.set(False)
+            self._refresh_tree_row(folder_key)
+            return
         self.rows[folder_key]["include"] = bool(self.include_var.get())
         self._refresh_tree_row(folder_key)
 
@@ -1524,6 +1546,9 @@ class ScanWindow(tk.Toplevel):
         for folder_key in self.folder_order:
             r = self.rows[folder_key]
             if not r["include"]:
+                skipped_folders += 1
+                continue
+            if not r.get("files"):
                 skipped_folders += 1
                 continue
 
