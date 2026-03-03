@@ -318,6 +318,17 @@ def build_student_key(student_id: str, student_name: str) -> str:
     return sid
 
 
+def has_required_student_fields(student_id: str, student_name: str) -> bool:
+    """
+    Only treat rows as valid students when BOTH are present:
+    - numeric student ID
+    - non-empty student name
+    """
+    sid = extract_numeric_id(student_id)
+    sname = re.sub(r"\s+", " ", (student_name or "").strip())
+    return bool(sid and sname)
+
+
 class FolderScannerBase:
     """
     Base scanner so folder scanning can be customized via inheritance later.
@@ -1580,7 +1591,7 @@ class ScanWindow(tk.Toplevel):
             self.tree.delete(item)
 
         total_files = 0
-        detected_students = 0
+        total_students = 0
         blank_folders = 0
         for folder_key in self.folder_order:
             r = self.rows[folder_key]
@@ -1588,8 +1599,8 @@ class ScanWindow(tk.Toplevel):
             total_files += len(files)
             if not files:
                 blank_folders += 1
-            if (r.get("final_id") or "").strip() and (r.get("final_name") or "").strip():
-                detected_students += 1
+            if has_required_student_fields(r.get("final_id", ""), r.get("final_name", "")):
+                total_students += 1
             self.tree.insert("", "end", iid=folder_key, values=(
                 "YES" if r.get("include") else "NO",
                 Path(r.get("folder") or folder_key).name,
@@ -1603,7 +1614,7 @@ class ScanWindow(tk.Toplevel):
 
         self.last_scan_snapshot_path = str(path)
         root_text = f"Root: {self.root_folder}" if self.root_folder else "Root: (from snapshot)"
-        self.status_lbl.config(text=f"{root_text} | Loaded snapshot. Folders: {len(self.folder_order)} | Files: {total_files} | Detected students: {detected_students} | Blank folders: {blank_folders}")
+        self.status_lbl.config(text=f"{root_text} | Loaded snapshot. Folders: {len(self.folder_order)} | Files: {total_files} | Total students: {total_students} | Blank folders: {blank_folders}")
 
     def load_scan_snapshot(self):
         path = filedialog.askopenfilename(
@@ -1660,7 +1671,7 @@ class ScanWindow(tk.Toplevel):
 
         total_files = 0
         blank_folders = 0
-        detected_students = 0
+        total_students = 0
         for sub in folders:
             final_id, final_name, det_id, det_name, files = scanner.detect_folder(sub)
             if existing_files:
@@ -1672,8 +1683,8 @@ class ScanWindow(tk.Toplevel):
             folder_key = str(sub)
             self.folder_order.append(folder_key)
             include_row = bool(files)
-            if final_id and final_name:
-                detected_students += 1
+            if has_required_student_fields(final_id or "", final_name or ""):
+                total_students += 1
             self.rows[folder_key] = {
                 "include": include_row,
                 "folder": folder_key,
@@ -1701,7 +1712,7 @@ class ScanWindow(tk.Toplevel):
                 str(len(r["files"]))
             ))
 
-        self.status_lbl.config(text=f"Scan done. Folders: {len(self.folder_order)} | Files: {total_files} | Detected students: {detected_students} | Blank folders: {blank_folders}")
+        self.status_lbl.config(text=f"Scan done. Folders: {len(self.folder_order)} | Files: {total_files} | Total students: {total_students} | Blank folders: {blank_folders}")
 
     def on_folder_select(self, _evt=None):
         sel = self.tree.selection()
@@ -1877,22 +1888,12 @@ class ScanWindow(tk.Toplevel):
             fname = (r["final_name"] or "").strip()
             lab = (r.get("lab_id") or "").strip() or None
 
-            fid_digits = extract_numeric_id(fid)
-
-            # Skip rows that still have neither a numeric ID nor a name.
-            if not fid_digits and not fname:
+            # Save only complete student records (numeric ID + name).
+            if not has_required_student_fields(fid, fname):
                 skipped_folders += 1
                 continue
 
-            if fid_digits:
-                fid = fid_digits
-            elif fname:
-                fid = f"NAME:{fname}"
-
-            if not fname:
-                fname = "Unknown Student"
-
-            fid = build_student_key(fid, fname)
+            fid = extract_numeric_id(fid)
             student_ok = bool(fid)
 
             upsert_student(self.con, fid, fname, lab, folder_key)
