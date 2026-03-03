@@ -322,15 +322,11 @@ def has_required_student_fields(student_id: str, student_name: str) -> bool:
     """
     Only treat rows as valid students when BOTH are present:
     - numeric student ID
-    - non-empty student name (not placeholder text)
+    - non-empty student name
     """
     sid = extract_numeric_id(student_id)
     sname = re.sub(r"\s+", " ", (student_name or "").strip())
-    if not sid or not sname:
-        return False
-    if sname.lower() in {"unknown student", "unknown"}:
-        return False
-    return True
+    return bool(sid and sname)
 
 
 class FolderScannerBase:
@@ -1643,13 +1639,17 @@ class ScanWindow(tk.Toplevel):
         for item in self.tree.get_children():
             self.tree.delete(item)
 
+        total_files = 0
+        total_students = 0
+        blank_folders = 0
         for folder_key in self.folder_order:
             r = self.rows[folder_key]
             files = r.get("files") or []
-            is_student = has_required_student_fields(r.get("final_id", ""), r.get("final_name", ""))
-            # Backward-compatible snapshots: auto-exclude non-students or empty-file rows by default.
-            base_include = bool(r["include"]) if "include" in r else True
-            r["include"] = base_include and bool(files) and is_student
+            total_files += len(files)
+            if not files:
+                blank_folders += 1
+            if has_required_student_fields(r.get("final_id", ""), r.get("final_name", "")):
+                total_students += 1
             self.tree.insert("", "end", iid=folder_key, values=(
                 "YES" if r.get("include") else "NO",
                 Path(r.get("folder") or folder_key).name,
@@ -1663,7 +1663,7 @@ class ScanWindow(tk.Toplevel):
 
         self.last_scan_snapshot_path = str(path)
         root_text = f"Root: {self.root_folder}" if self.root_folder else "Root: (from snapshot)"
-        self._set_scan_status(prefix=f"{root_text} | Loaded snapshot")
+        self.status_lbl.config(text=f"{root_text} | Loaded snapshot. Folders: {len(self.folder_order)} | Files: {total_files} | Total students: {total_students} | Blank folders: {blank_folders}")
 
     def load_scan_snapshot(self):
         path = filedialog.askopenfilename(
@@ -1718,14 +1718,18 @@ class ScanWindow(tk.Toplevel):
         self.rows.clear()
         self.folder_order.clear()
 
+        total_files = 0
+        blank_folders = 0
+        total_students = 0
         for sub in folders:
             final_id, final_name, det_id, det_name, files = scanner.detect_folder(sub)
             if existing_files:
                 files = [fp for fp in files if fp not in existing_files]
             folder_key = str(sub)
             self.folder_order.append(folder_key)
-            is_student = has_required_student_fields(final_id or "", final_name or "")
-            include_row = bool(files) and is_student
+            include_row = bool(files)
+            if has_required_student_fields(final_id or "", final_name or ""):
+                total_students += 1
             self.rows[folder_key] = {
                 "include": include_row,
                 "folder": folder_key,
@@ -1753,7 +1757,7 @@ class ScanWindow(tk.Toplevel):
                 str(len(r["files"]))
             ))
 
-        self._set_scan_status(prefix="Scan done")
+        self.status_lbl.config(text=f"Scan done. Folders: {len(self.folder_order)} | Files: {total_files} | Total students: {total_students} | Blank folders: {blank_folders}")
 
     def on_folder_select(self, _evt=None):
         sel = self.tree.selection()
