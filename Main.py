@@ -954,23 +954,69 @@ class PDFExporter:
 
         return "\n".join(out)
 
+    def _escape_pdf_text(self, text: str) -> str:
+        return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def _parse_tk_index(self, idx: str) -> tuple[int, int]:
+        try:
+            line, col = str(idx).split(".", 1)
+            return max(1, int(line)), max(0, int(col))
+        except Exception:
+            return 1, 0
+
+    def _tk_index_to_offset(self, line_starts: list[int], code_len: int, idx: str) -> int:
+        line_no, col = self._parse_tk_index(idx)
+        if not line_starts:
+            return 0
+        line_no = min(max(1, line_no), len(line_starts))
+        base = line_starts[line_no - 1]
+        return min(code_len, max(0, base + col))
+
+    def _render_line_with_highlights(self, line_text: str, line_start: int, line_end: int,
+                                     ranges: list[tuple[int, int]], line_no: int) -> str:
+        if line_start >= line_end:
+            return f"{line_no:04d} |"
+
+        overlaps: list[tuple[int, int]] = []
+        for r0, r1 in ranges:
+            if r1 <= line_start or r0 >= line_end:
+                continue
+            overlaps.append((max(r0, line_start), min(r1, line_end)))
+
+        if not overlaps:
+            return f"{line_no:04d} | {self._escape_pdf_text(line_text)}"
+
+        overlaps.sort()
+        merged: list[tuple[int, int]] = []
+        for s, e in overlaps:
+            if not merged or s > merged[-1][1]:
+                merged.append((s, e))
+            else:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+
+        parts = [f"{line_no:04d} | "]
+        cursor = line_start
+        for s, e in merged:
+            if cursor < s:
+                parts.append(self._escape_pdf_text(line_text[cursor - line_start:s - line_start]))
+            parts.append(f"<font backColor=\"#FFF9A6\">{self._escape_pdf_text(line_text[s - line_start:e - line_start])}</font>")
+            cursor = e
+        if cursor < line_end:
+            parts.append(self._escape_pdf_text(line_text[cursor - line_start:line_end - line_start]))
+        return "".join(parts)
+
     def _build_highlighted_code_blocks(self, sid: str):
         """
-        Returns per-file rows that can be rendered in a PDF table with true background color
-        on highlighted lines.
+        Returns per-file rows rendered with exact character-level highlights,
+        matching the Tk text selection ranges used by graders.
         """
-        blocks: list[tuple[str, list[tuple[str, bool]]]] = []
+        blocks: list[tuple[str, list[str]]] = []
         files = get_student_files(self.sub_con, sid)
 
         rows = fetch_code_comments_for_student(self.grade_con, sid)
-        # Map: file -> set(lines_with_comment)
-        file_lines = {}
-        for fp, sidx, _eidx, _txt, _color, _ts in rows:
-            try:
-                line = int(str(sidx).split(".", 1)[0])
-            except Exception:
-                line = 1
-            file_lines.setdefault(fp, set()).add(line)
+        file_ranges: dict[str, list[tuple[str, str]]] = {}
+        for fp, sidx, eidx, _txt, _color, _ts in rows:
+            file_ranges.setdefault(fp, []).append((sidx, eidx))
 
         for fp in files:
             code = get_file_content(self.sub_con, fp)
@@ -979,11 +1025,31 @@ class PDFExporter:
                     code = Path(fp).read_text(encoding="utf-8", errors="ignore")
                 except Exception:
                     code = ""
-            lines = code.splitlines()
-            marks = file_lines.get(fp, set())
-            rendered_lines = []
-            for i, line in enumerate(lines, start=1):
-                rendered_lines.append((f"{i:04d} | {line}", i in marks))
+            lines = code.splitlines(keepends=True)
+
+            line_starts: list[int] = []
+            pos = 0
+            for line in lines:
+                line_starts.append(pos)
+                pos += len(line)
+            code_len = len(code)
+
+            normalized_ranges: list[tuple[int, int]] = []
+            for sidx, eidx in file_ranges.get(fp, []):
+                start_off = self._tk_index_to_offset(line_starts, code_len, sidx)
+                end_off = self._tk_index_to_offset(line_starts, code_len, eidx)
+                if end_off < start_off:
+                    start_off, end_off = end_off, start_off
+                if start_off == end_off:
+                    continue
+                normalized_ranges.append((start_off, end_off))
+
+            rendered_lines: list[str] = []
+            for i, raw_line in enumerate(lines, start=1):
+                clean_line = raw_line.rstrip("\r\n")
+                line_start = line_starts[i - 1]
+                line_end = line_start + len(clean_line)
+                rendered_lines.append(self._render_line_with_highlights(clean_line, line_start, line_end, normalized_ranges, i))
             blocks.append((Path(fp).name, rendered_lines))
 
         return blocks
@@ -1160,24 +1226,20 @@ class PDFExporter:
         line_style = styles["Code"].clone("code_line_style")
         line_style.fontSize = 7
         line_style.leading = 8
-        for bi, (fname, lines_with_flags) in enumerate(blocks):
+        for bi, (fname, rendered_lines) in enumerate(blocks):
             story.append(Paragraph(f"<b>{fname}</b>", styles["Heading3"]))
-            if not lines_with_flags:
+            if not rendered_lines:
                 story.append(Paragraph("(empty file)", styles["Normal"]))
             else:
-                table_data = [[Paragraph((line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")) or " ", line_style)] for line, _marked in lines_with_flags]
+                table_data = [[Paragraph(line or " ", line_style)] for line in rendered_lines]
                 tbl_code = Table(table_data, colWidths=[516], repeatRows=0)
-                style_cmds = [
+                tbl_code.setStyle(TableStyle([
                     ("GRID", (0,0), (-1,-1), 0.2, colors.HexColor("#E0E0E0")),
                     ("LEFTPADDING", (0,0), (-1,-1), 4),
                     ("RIGHTPADDING", (0,0), (-1,-1), 4),
                     ("TOPPADDING", (0,0), (-1,-1), 1),
                     ("BOTTOMPADDING", (0,0), (-1,-1), 1),
-                ]
-                for row_i, (_line, marked) in enumerate(lines_with_flags):
-                    if marked:
-                        style_cmds.append(("BACKGROUND", (0,row_i), (0,row_i), colors.HexColor("#FFF9A6")))
-                tbl_code.setStyle(TableStyle(style_cmds))
+                ]))
                 story.append(tbl_code)
             if bi < len(blocks) - 1:
                 story.append(PageBreak())
@@ -2038,8 +2100,11 @@ class ScanWindow(tk.Toplevel):
 
         self.preview.delete("1.0", tk.END)
 
-    def on_file_select(self, _evt=None):
-        sel = self.files_tree.selection()
+    def on_file_select(self, _evt=None, file_iid: str | None = None):
+        if file_iid is not None:
+            sel = (file_iid,)
+        else:
+            sel = self.files_tree.selection()
         if not sel:
             return
         fp = self.files_tree.item(sel[0], "values")[0]
@@ -2283,8 +2348,10 @@ class ScanWindow(tk.Toplevel):
         self.files_tree.selection_set(iid)
         self.files_tree.focus(iid)
         self.files_tree.see(iid)
+        self.files_tree.focus_set()
+        self.update_idletasks()
         self.files_tree.event_generate("<<TreeviewSelect>>")
-        self.on_file_select()
+        self.on_file_select(file_iid=iid)
         return True
 
     def start_skimming(self):
