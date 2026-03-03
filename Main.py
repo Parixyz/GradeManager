@@ -1445,7 +1445,7 @@ class ScanWindow(tk.Toplevel):
         right.columnconfigure(0, weight=1)
 
         ttk.Label(right, text="Files in Selected Folder", style="Pastel.TLabel").grid(row=0, column=0, sticky="w")
-        self.files_list = tk.Listbox(right, height=10)
+        self.files_list = tk.Listbox(right, height=10, exportselection=False)
         self.files_list.grid(row=1, column=0, sticky="nsew")
         self.files_list.bind("<<ListboxSelect>>", self.on_file_select)
 
@@ -1608,7 +1608,8 @@ class ScanWindow(tk.Toplevel):
 
     def load_existing_rows_from_db(self):
         """
-        Populate Scan/Edit with current submissions DB rows.
+        Populate Scan/Edit with DB rows by folder first (not just student rows),
+        then add any remaining students with no files.
         """
         self.rows.clear()
         self.folder_order.clear()
@@ -1618,33 +1619,100 @@ class ScanWindow(tk.Toplevel):
             FROM students
             ORDER BY student_id
         """).fetchall()
+        student_map = {sid: {"name": sname or "", "lab": lab or "", "folder_path": folder_path or ""}
+                       for sid, sname, lab, folder_path in students}
 
         used_keys = set()
-        for sid, sname, lab, folder_path in students:
-            files = [r[0] for r in self.con.execute(
-                "SELECT file_path FROM files WHERE student_id=? ORDER BY file_path", (sid,)
-            ).fetchall()]
 
-            base_key = (folder_path or "").strip() or f"DB:{sid}"
+        def _unique_key(base_key: str) -> str:
             folder_key = base_key
             n = 2
             while folder_key in used_keys:
                 folder_key = f"{base_key}#{n}"
                 n += 1
             used_keys.add(folder_key)
+            return folder_key
 
-            include_row = bool(files) and has_required_student_fields(sid, sname)
+        folder_groups: dict[str, dict] = {}
+        file_rows = self.con.execute("""
+            SELECT
+              file_path,
+              COALESCE(student_id, ''),
+              COALESCE(source_folder, ''),
+              COALESCE(detected_id, ''),
+              COALESCE(detected_name, '')
+            FROM files
+            ORDER BY source_folder, file_path
+        """).fetchall()
+
+        for fp, sid, source_folder, det_id, det_name in file_rows:
+            sid = (sid or "").strip()
+            folder_path = (source_folder or "").strip() or str(Path(fp).parent)
+            if not folder_path:
+                folder_path = f"UNASSIGNED:{fp}"
+
+            grp = folder_groups.setdefault(folder_path, {
+                "files": [],
+                "det_id": "",
+                "det_name": "",
+                "student_id": "",
+            })
+            grp["files"].append(fp)
+            if sid and not grp["student_id"]:
+                grp["student_id"] = sid
+            if det_id and not grp["det_id"]:
+                grp["det_id"] = det_id
+            if det_name and not grp["det_name"]:
+                grp["det_name"] = det_name
+
+        represented_students = set()
+
+        for folder_path in sorted(folder_groups.keys()):
+            grp = folder_groups[folder_path]
+            files = grp.get("files") or []
+            sid = (grp.get("student_id") or "").strip()
+            student_row = student_map.get(sid)
+            if student_row:
+                represented_students.add(sid)
+
+            det_id = (grp.get("det_id") or "").strip()
+            det_name = (grp.get("det_name") or "").strip()
+            final_id = sid if student_row else det_id
+            final_name = (student_row["name"] if student_row else det_name) or Path(folder_path).name
+            lab = student_row["lab"] if student_row else ""
+
+            include_row = bool(files) and has_required_student_fields(final_id, final_name)
+            folder_key = _unique_key(folder_path)
             self.folder_order.append(folder_key)
             self.rows[folder_key] = {
                 "include": include_row,
                 "manual_include_override": None,
-                "folder": folder_key,
+                "folder": folder_path,
+                "det_id": final_id or det_id,
+                "det_name": final_name or det_name,
+                "final_id": final_id,
+                "final_name": final_name,
+                "lab_id": lab,
+                "files": files,
+            }
+
+        # Keep students without files editable too (legacy or pre-setup rows).
+        for sid, sname, lab, folder_path in students:
+            if sid in represented_students:
+                continue
+            base_key = (folder_path or "").strip() or f"DB:{sid}"
+            folder_key = _unique_key(base_key)
+            self.folder_order.append(folder_key)
+            self.rows[folder_key] = {
+                "include": False,
+                "manual_include_override": None,
+                "folder": base_key,
                 "det_id": sid or "",
                 "det_name": sname or "",
                 "final_id": sid or "",
                 "final_name": sname or "",
                 "lab_id": lab or "",
-                "files": files,
+                "files": [],
             }
 
         for item in self.tree.get_children():
@@ -1930,6 +1998,8 @@ class ScanWindow(tk.Toplevel):
         self.files_list.selection_set(file_idx)
         self.files_list.activate(file_idx)
         self.files_list.see(file_idx)
+        self.files_list.focus_set()
+        self.files_list.event_generate("<<ListboxSelect>>")
         self.on_file_select()
         return True
 
@@ -1956,9 +2026,11 @@ class ScanWindow(tk.Toplevel):
         current = self.sel_folder_var.get().strip()
         if current in self._skimmable_folder_keys:
             self._skim_folder_idx = self._skimmable_folder_keys.index(current)
+            selected_files = self.files_list.curselection()
+            self._skim_file_idx = int(selected_files[0]) if selected_files else 0
         else:
             self._skim_folder_idx = 0
-        self._skim_file_idx = 0
+            self._skim_file_idx = 0
         self.skim_running = True
         self._set_scan_status(prefix="Skimming started")
         self._skim_step()
