@@ -1261,29 +1261,38 @@ class ScanWindow(tk.Toplevel):
         top = ttk.Frame(self, padding=10, style="Pastel.TFrame")
         top.pack(fill=tk.X)
 
-        ttk.Button(top, text="Choose ROOT Folder", command=self.choose_root).pack(side=tk.LEFT)
-        ttk.Button(top, text="Scan Now", command=self.scan).pack(side=tk.LEFT, padx=8)
-        ttk.Checkbutton(top, text="Store file content in DB (bigger DB)", variable=self.store_file_content).pack(side=tk.LEFT, padx=10)
+        actions = ttk.Frame(top, style="Pastel.TFrame")
+        actions.pack(fill=tk.X)
 
-        ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Button(actions, text="Choose ROOT Folder", command=self.choose_root).pack(side=tk.LEFT)
+        ttk.Button(actions, text="Scan Now", command=self.scan).pack(side=tk.LEFT, padx=8)
+        ttk.Checkbutton(actions, text="Store file content in DB (bigger DB)", variable=self.store_file_content).pack(side=tk.LEFT, padx=10)
 
-        ttk.Label(top, text="File globs (comma-separated)", style="Pastel.TLabel").pack(side=tk.LEFT)
-        ttk.Entry(top, textvariable=self.file_globs_var, width=22).pack(side=tk.LEFT, padx=(6, 10))
-        ttk.Label(top, text="Filename include-regex (optional)", style="Pastel.TLabel").pack(side=tk.LEFT)
-        ttk.Entry(top, textvariable=self.filename_regex_var, width=24).pack(side=tk.LEFT, padx=(6, 10))
+        ttk.Button(actions, text="Commit Scan (Save to DB)", command=self.commit).pack(side=tk.RIGHT)
 
-        ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
-
-        ttk.Label(top, text="Folder ID regex (cap group)", style="Pastel.TLabel").pack(side=tk.LEFT)
-        ttk.Entry(top, textvariable=self.folder_id_regex_var, width=18).pack(side=tk.LEFT, padx=(6, 10))
-        ttk.Label(top, text="Folder Name regex (cap group)", style="Pastel.TLabel").pack(side=tk.LEFT)
-        ttk.Entry(top, textvariable=self.folder_name_regex_var, width=22).pack(side=tk.LEFT, padx=(6, 10))
-        ttk.Button(top, text="Reset Regex", command=self.reset_regex_defaults).pack(side=tk.LEFT, padx=(0, 8))
-
-        ttk.Button(top, text="Commit Scan (Save to DB)", command=self.commit).pack(side=tk.RIGHT)
-
-        self.status_lbl = ttk.Label(top, text="No folder selected.", style="Pastel.TLabel")
+        self.status_lbl = ttk.Label(actions, text="No folder selected.", style="Pastel.TLabel")
         self.status_lbl.pack(side=tk.RIGHT, padx=10)
+
+        opts_nb = ttk.Notebook(top)
+        opts_nb.pack(fill=tk.X, pady=(8, 0))
+
+        filters_tab = ttk.Frame(opts_nb, style="Pastel.TFrame", padding=8)
+        regex_tab = ttk.Frame(opts_nb, style="Pastel.TFrame", padding=8)
+        opts_nb.add(filters_tab, text="Scan Filters")
+        opts_nb.add(regex_tab, text="Regex")
+
+        ttk.Label(filters_tab, text="File globs (comma-separated)", style="Pastel.TLabel").pack(side=tk.LEFT)
+        ttk.Entry(filters_tab, textvariable=self.file_globs_var, width=30).pack(side=tk.LEFT, padx=(6, 12))
+        ttk.Label(filters_tab, text="Filename include-regex (optional)", style="Pastel.TLabel").pack(side=tk.LEFT)
+        ttk.Entry(filters_tab, textvariable=self.filename_regex_var, width=34).pack(side=tk.LEFT, padx=(6, 0))
+
+        ttk.Label(regex_tab, text="Folder ID regex (cap group)", style="Pastel.TLabel").pack(side=tk.LEFT)
+        ttk.Entry(regex_tab, textvariable=self.folder_id_regex_var, width=24).pack(side=tk.LEFT, padx=(6, 12))
+        ttk.Label(regex_tab, text="Folder Name regex (cap group)", style="Pastel.TLabel").pack(side=tk.LEFT)
+        ttk.Entry(regex_tab, textvariable=self.folder_name_regex_var, width=32).pack(side=tk.LEFT, padx=(6, 12))
+        ttk.Button(regex_tab, text="Reset Regex", command=self.reset_regex_defaults).pack(side=tk.LEFT)
+        ttk.Button(regex_tab, text="Save Regex Copy", command=self.save_regex_copy).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(regex_tab, text="Load Regex Copy", command=self.load_regex_copy).pack(side=tk.LEFT, padx=(8, 0))
 
         main = ttk.Frame(self, padding=10, style="Pastel.TFrame")
         main.pack(fill=tk.BOTH, expand=True)
@@ -1382,6 +1391,49 @@ class ScanWindow(tk.Toplevel):
         self.filename_regex_var.set("")
         self.folder_id_regex_var.set(r"(\d{5,12})")
         self.folder_name_regex_var.set(r"([A-Za-z]+(?:\s+[A-Za-z]+)+)")
+
+    def _scan_settings_payload(self) -> dict:
+        return {
+            "file_globs": (self.file_globs_var.get() or "").strip() or "*.java",
+            "filename_regex": (self.filename_regex_var.get() or "").strip(),
+            "folder_id_regex": (self.folder_id_regex_var.get() or "").strip(),
+            "folder_name_regex": (self.folder_name_regex_var.get() or "").strip(),
+        }
+
+    def save_regex_copy(self):
+        path = filedialog.asksaveasfilename(
+            title="Save regex copy",
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        payload = self._scan_settings_payload()
+        try:
+            Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+            return
+        messagebox.showinfo("Saved", f"Regex copy saved:\n{path}")
+
+    def load_regex_copy(self):
+        path = filedialog.askopenfilename(
+            title="Load regex copy",
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception as e:
+            messagebox.showerror("Load failed", str(e))
+            return
+
+        self.file_globs_var.set((payload.get("file_globs") or "*.java").strip() or "*.java")
+        self.filename_regex_var.set((payload.get("filename_regex") or "").strip())
+        self.folder_id_regex_var.set((payload.get("folder_id_regex") or r"(\d{5,12})").strip())
+        self.folder_name_regex_var.set((payload.get("folder_name_regex") or r"([A-Za-z]+(?:\s+[A-Za-z]+)+)").strip())
+        messagebox.showinfo("Loaded", f"Regex copy loaded:\n{path}")
 
     def scan(self):
         if not self.root_folder:
