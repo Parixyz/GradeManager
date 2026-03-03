@@ -320,12 +320,17 @@ def build_student_key(student_id: str, student_name: str) -> str:
 
 def has_required_student_fields(student_id: str, student_name: str) -> bool:
     """
-    Only treat rows as valid students when BOTH are present:
-    - numeric student ID
-    - non-empty student name (not placeholder text)
+    Treat rows as valid student-like records when:
+    - numeric student ID + non-empty student name, OR
+    - the special FULL aggregate row.
     """
-    sid = extract_numeric_id(student_id)
+    raw_sid = (student_id or "").strip()
     sname = re.sub(r"\s+", " ", (student_name or "").strip())
+
+    if raw_sid.lower() == "full":
+        return True
+
+    sid = extract_numeric_id(raw_sid)
     if not sid or not sname:
         return False
     if sname.lower() in {"unknown student", "unknown"}:
@@ -1399,8 +1404,9 @@ class ScanWindow(tk.Toplevel):
 
         left = ttk.Frame(main, style="Pastel.TFrame")
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        left.rowconfigure(1, weight=1)
-        ttk.Label(left, text="Folders (edit final ID/Name/LabID here before saving)", style="Pastel.TLabel").grid(row=0, column=0, sticky="w")
+        left.rowconfigure(1, weight=3)
+        left.rowconfigure(3, weight=2)
+        ttk.Label(left, text="Full list (all scanned folders)", style="Pastel.TLabel").grid(row=0, column=0, sticky="w")
 
         cols = ("include", "folder", "det_id", "det_name", "final_id", "final_name", "lab_id", "nfiles")
         self.tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
@@ -1410,6 +1416,14 @@ class ScanWindow(tk.Toplevel):
             self.tree.column(c, width=w, anchor="w")
         self.tree.grid(row=1, column=0, sticky="nsew")
         self.tree.bind("<<TreeviewSelect>>", self.on_folder_select)
+
+        ttk.Label(left, text="Student list (valid ID + name)", style="Pastel.TLabel").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        student_cols = ("student_id", "student_name", "lab_id", "folder", "nfiles")
+        self.student_tree = ttk.Treeview(left, columns=student_cols, show="headings", selectmode="none", height=8)
+        for c, w in [("student_id", 130), ("student_name", 170), ("lab_id", 90), ("folder", 220), ("nfiles", 60)]:
+            self.student_tree.heading(c, text=c)
+            self.student_tree.column(c, width=w, anchor="w")
+        self.student_tree.grid(row=3, column=0, sticky="nsew")
 
         mid = ttk.Frame(main, style="Pastel.TFrame")
         mid.grid(row=0, column=1, sticky="nsew", padx=(0, 10))
@@ -1886,18 +1900,19 @@ class ScanWindow(tk.Toplevel):
             return
         row = self.rows[folder_key]
         files = row.get("files") or []
-        is_student = has_required_student_fields(row.get("final_id", ""), row.get("final_name", ""))
-        if not files or not is_student:
+        if not files:
             row["include"] = False
             row["manual_include_override"] = False
             self.include_var.set(False)
             self._refresh_tree_row(folder_key)
+            self._reload_student_rows()
             self._set_scan_status(prefix="Scan info")
             return
 
         row["include"] = bool(self.include_var.get())
         row["manual_include_override"] = row["include"]
         self._refresh_tree_row(folder_key)
+        self._reload_student_rows()
         self._set_scan_status(prefix="Scan info")
 
     def apply_edits(self):
@@ -1906,7 +1921,7 @@ class ScanWindow(tk.Toplevel):
             return
 
         raw_fid = self.final_id_var.get().strip()
-        fid = extract_numeric_id(raw_fid)
+        fid = "FULL" if raw_fid.lower() == "full" else extract_numeric_id(raw_fid)
         fname = self.final_name_var.get().strip()
         lab = self.lab_id_var.get().strip()
 
@@ -1914,16 +1929,14 @@ class ScanWindow(tk.Toplevel):
         self.rows[folder_key]["final_name"] = fname
         self.rows[folder_key]["lab_id"] = lab
 
-        is_student = has_required_student_fields(fid, fname)
         has_files = bool(self.rows[folder_key].get("files"))
         manual_override = self.rows[folder_key].get("manual_include_override")
 
-        if not (has_files and is_student):
+        if not has_files:
             self.rows[folder_key]["include"] = False
         elif manual_override is False:
             self.rows[folder_key]["include"] = False
         else:
-            # If row is valid and user did not manually exclude it, include it.
             self.rows[folder_key]["include"] = True
 
         self._suspend_auto_apply = True
@@ -1931,6 +1944,7 @@ class ScanWindow(tk.Toplevel):
         self._suspend_auto_apply = False
 
         self._refresh_tree_row(folder_key)
+        self._reload_student_rows()
         self._set_scan_status(prefix="Scan info")
 
     def _refresh_tree_row(self, folder_key: str):
@@ -2054,6 +2068,26 @@ class ScanWindow(tk.Toplevel):
                 str(len(r["files"]))
             ))
 
+        self._reload_student_rows()
+
+    def _reload_student_rows(self):
+        for item in self.student_tree.get_children():
+            self.student_tree.delete(item)
+
+        idx = 0
+        for folder_key in self.folder_order:
+            r = self.rows.get(folder_key) or {}
+            if not has_required_student_fields(r.get("final_id", ""), r.get("final_name", "")):
+                continue
+            idx += 1
+            self.student_tree.insert("", "end", iid=f"student-{idx}", values=(
+                r.get("final_id", ""),
+                r.get("final_name", ""),
+                r.get("lab_id", ""),
+                Path(r.get("folder", folder_key)).name,
+                str(len(r.get("files") or [])),
+            ))
+
     def _build_skim_steps(self):
         steps: list[tuple[str, int | None]] = []
         by_files = bool(self.skim_files_one_by_one_var.get())
@@ -2108,21 +2142,8 @@ class ScanWindow(tk.Toplevel):
             messagebox.showinfo("Skimming", "No files available for skimming.")
             return
 
-        current_folder = self.selected_folder_key or self.sel_folder_var.get().strip()
-        selected_files = self.files_list.curselection()
-        current_file_idx = int(selected_files[0]) if selected_files else 0
-
+        # Always start from index 0 for consistent skimming across the full list.
         self._skim_step_idx = 0
-        for i, (folder_key, file_idx) in enumerate(self._skim_steps):
-            if folder_key != current_folder:
-                continue
-            if file_idx is None:
-                self._skim_step_idx = i
-                break
-            if file_idx >= current_file_idx:
-                self._skim_step_idx = i
-                break
-
         self._skim_folder_idx = 0
         self._skim_file_idx = 0
         self.skim_running = True
@@ -2203,16 +2224,18 @@ class ScanWindow(tk.Toplevel):
             fname = (r["final_name"] or "").strip()
             lab = (r.get("lab_id") or "").strip() or None
 
-            # Save only complete student records (numeric ID + name).
-            if not has_required_student_fields(fid, fname):
-                skipped_folders += 1
-                continue
+            student_ok = has_required_student_fields(fid, fname)
+            normalized_sid = (fid or "").strip()
+            if normalized_sid.lower() != "full":
+                normalized_sid = extract_numeric_id(normalized_sid)
 
-            fid = extract_numeric_id(fid)
-            student_ok = bool(fid)
-
-            upsert_student(self.con, fid, fname, lab, r.get("folder") or folder_key)
-            created_students += 1
+            if student_ok and normalized_sid:
+                upsert_student(self.con, normalized_sid, fname, lab, r.get("folder") or folder_key)
+                created_students += 1
+            elif student_ok and (fid or "").strip().lower() == "full":
+                upsert_student(self.con, "FULL", fname or "FULL", lab, r.get("folder") or folder_key)
+                normalized_sid = "FULL"
+                created_students += 1
 
             for fp in r["files"]:
                 p = Path(fp)
@@ -2229,7 +2252,7 @@ class ScanWindow(tk.Toplevel):
                 upsert_file(
                     self.con,
                     file_path=fp,
-                    student_id=fid if student_ok else None,
+                    student_id=normalized_sid if student_ok and normalized_sid else None,
                     source_folder=r.get("folder") or folder_key,
                     detected_id=r["det_id"] or None,
                     detected_name=r["det_name"] or None,
