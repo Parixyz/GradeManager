@@ -264,25 +264,48 @@ def infer_student_for_folder(
         if detected_id and detected_name:
             break
 
-    # Folder regex fallback
-    folder_id, folder_name = try_extract_from_folder_name(folder, folder_id_regex, folder_name_regex)
-    if not detected_id and folder_id:
-        detected_id = folder_id
-    if not detected_name and folder_name:
-        detected_name = folder_name
+    # Optional folder regex fallback (disabled by default; folder names are often machine IDs).
+    folder_id = ""
+    folder_name = ""
+    if folder_id_regex or folder_name_regex:
+        folder_id, folder_name = try_extract_from_folder_name(folder, folder_id_regex, folder_name_regex)
+        if not detected_id and folder_id:
+            detected_id = folder_id
+        if not detected_name and folder_name:
+            detected_name = folder_name
 
     final_id = None
     final_name = None
 
     if detected_id or detected_name:
         if detected_id:
-            final_id = detected_id
             final_name = detected_name or "Unknown Student"
+            final_id = build_student_key(detected_id, final_name)
         else:
             final_name = (detected_name or "Unknown Student").strip()
             final_id = f"NAME:{final_name}"
 
     return final_id, final_name, (detected_id or ""), (detected_name or ""), [str(p) for p in files]
+
+
+def build_student_key(student_id: str, student_name: str) -> str:
+    """
+    Build a stable student key that keeps both ID and name so counts do not
+    collapse when IDs are repeated across differently named submissions.
+    """
+    sid = (student_id or "").strip()
+    sname = re.sub(r"\s+", " ", (student_name or "").strip())
+
+    if not sid:
+        return f"NAME:{sname}" if sname else ""
+    if sid.startswith("NAME:"):
+        return sid
+    if sid.lower() == "full":
+        return sid
+    if not sname or sname.lower() == "unknown student":
+        return sid
+
+    return f"{sid} | {sname}"
 
 
 class FolderScannerBase:
@@ -1244,13 +1267,14 @@ class ScanWindow(tk.Toplevel):
         self.geometry("1650x920")
 
         self.root_folder: Path | None = None
+        # Always store file content so previews are consistently available after reload.
         self.store_file_content = tk.BooleanVar(value=True)
 
         # Flex settings
         self.file_globs_var = tk.StringVar(value="*.java")
         self.filename_regex_var = tk.StringVar(value="")  # optional
-        self.folder_id_regex_var = tk.StringVar(value=r"(\d{5,12})")
-        self.folder_name_regex_var = tk.StringVar(value=r"([A-Za-z]+(?:\s+[A-Za-z]+)+)")
+        self.folder_id_regex_var = tk.StringVar(value="")
+        self.folder_name_regex_var = tk.StringVar(value="")
 
         self.rows: dict[str, dict] = {}
         self.folder_order: list[str] = []
@@ -1266,7 +1290,8 @@ class ScanWindow(tk.Toplevel):
 
         ttk.Button(actions, text="Choose ROOT Folder", command=self.choose_root).pack(side=tk.LEFT)
         ttk.Button(actions, text="Scan Now", command=self.scan).pack(side=tk.LEFT, padx=8)
-        ttk.Checkbutton(actions, text="Store file content in DB (bigger DB)", variable=self.store_file_content).pack(side=tk.LEFT, padx=10)
+        ttk.Button(actions, text="Save Scan Snapshot", command=self.save_scan_snapshot).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(actions, text="Load Scan Snapshot", command=self.load_scan_snapshot).pack(side=tk.LEFT, padx=(8, 0))
 
         ttk.Button(actions, text="Commit Scan (Save to DB)", command=self.commit).pack(side=tk.RIGHT)
 
@@ -1340,10 +1365,8 @@ class ScanWindow(tk.Toplevel):
         self.lab_id_var = tk.StringVar()
         ttk.Entry(mid, textvariable=self.lab_id_var).grid(row=8, column=0, sticky="ew")
 
-        btns = ttk.Frame(mid, style="Pastel.TFrame")
-        btns.grid(row=9, column=0, sticky="ew", pady=(10, 0))
-        ttk.Button(btns, text="Apply Edit to Folder Row", command=self.apply_edits).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(btns, text="Auto ID from Name (NAME:...)", command=self.auto_id_from_name).pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
+        self._suspend_auto_apply = False
+        self._bind_auto_apply()
 
         right = ttk.Frame(main, style="Pastel.TFrame")
         right.grid(row=0, column=2, sticky="nsew")
@@ -1389,8 +1412,19 @@ class ScanWindow(tk.Toplevel):
     def reset_regex_defaults(self):
         self.file_globs_var.set("*.java")
         self.filename_regex_var.set("")
-        self.folder_id_regex_var.set(r"(\d{5,12})")
-        self.folder_name_regex_var.set(r"([A-Za-z]+(?:\s+[A-Za-z]+)+)")
+        self.folder_id_regex_var.set("")
+        self.folder_name_regex_var.set("")
+
+
+    def _bind_auto_apply(self):
+        self.final_id_var.trace_add("write", self._on_manual_edit)
+        self.final_name_var.trace_add("write", self._on_manual_edit)
+        self.lab_id_var.trace_add("write", self._on_manual_edit)
+
+    def _on_manual_edit(self, *_args):
+        if self._suspend_auto_apply:
+            return
+        self.apply_edits()
 
     def _scan_settings_payload(self) -> dict:
         return {
@@ -1431,9 +1465,89 @@ class ScanWindow(tk.Toplevel):
 
         self.file_globs_var.set((payload.get("file_globs") or "*.java").strip() or "*.java")
         self.filename_regex_var.set((payload.get("filename_regex") or "").strip())
-        self.folder_id_regex_var.set((payload.get("folder_id_regex") or r"(\d{5,12})").strip())
-        self.folder_name_regex_var.set((payload.get("folder_name_regex") or r"([A-Za-z]+(?:\s+[A-Za-z]+)+)").strip())
+        self.folder_id_regex_var.set((payload.get("folder_id_regex") or "").strip())
+        self.folder_name_regex_var.set((payload.get("folder_name_regex") or "").strip())
         messagebox.showinfo("Loaded", f"Regex copy loaded:\n{path}")
+
+    def save_scan_snapshot(self):
+        if not self.rows:
+            messagebox.showinfo("Nothing", "Scan first, then save a snapshot.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save scan snapshot",
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        payload = {
+            "root_folder": str(self.root_folder) if self.root_folder else "",
+            "settings": self._scan_settings_payload(),
+            "folder_order": self.folder_order,
+            "rows": self.rows,
+        }
+        try:
+            Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+            return
+        messagebox.showinfo("Saved", f"Scan snapshot saved:\n{path}")
+
+    def load_scan_snapshot(self):
+        path = filedialog.askopenfilename(
+            title="Load scan snapshot",
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception as e:
+            messagebox.showerror("Load failed", str(e))
+            return
+
+        settings = payload.get("settings") or {}
+        self.file_globs_var.set((settings.get("file_globs") or "*.java").strip() or "*.java")
+        self.filename_regex_var.set((settings.get("filename_regex") or "").strip())
+        self.folder_id_regex_var.set((settings.get("folder_id_regex") or "").strip())
+        self.folder_name_regex_var.set((settings.get("folder_name_regex") or "").strip())
+
+        loaded_rows = payload.get("rows") or {}
+        loaded_order = payload.get("folder_order") or list(loaded_rows.keys())
+        self.rows = {k: v for k, v in loaded_rows.items() if isinstance(v, dict)}
+        self.folder_order = [k for k in loaded_order if k in self.rows]
+
+        root_raw = (payload.get("root_folder") or "").strip()
+        self.root_folder = Path(root_raw) if root_raw else None
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        total_files = 0
+        detected_students = 0
+        blank_folders = 0
+        for folder_key in self.folder_order:
+            r = self.rows[folder_key]
+            files = r.get("files") or []
+            total_files += len(files)
+            if not files:
+                blank_folders += 1
+            if (r.get("final_id") or "").strip() and (r.get("final_name") or "").strip():
+                detected_students += 1
+            self.tree.insert("", "end", iid=folder_key, values=(
+                "YES" if r.get("include") else "NO",
+                Path(r.get("folder") or folder_key).name,
+                r.get("det_id", ""),
+                r.get("det_name", ""),
+                r.get("final_id", ""),
+                r.get("final_name", ""),
+                r.get("lab_id", ""),
+                str(len(files))
+            ))
+
+        root_text = f"Root: {self.root_folder}" if self.root_folder else "Root: (from snapshot)"
+        self.status_lbl.config(text=f"{root_text} | Loaded snapshot. Folders: {len(self.folder_order)} | Files: {total_files} | Detected students: {detected_students} | Blank folders: {blank_folders}")
 
     def scan(self):
         if not self.root_folder:
@@ -1511,9 +1625,11 @@ class ScanWindow(tk.Toplevel):
 
         self.sel_folder_var.set(folder_key)
         self.include_var.set(bool(r["include"]))
+        self._suspend_auto_apply = True
         self.final_id_var.set(r["final_id"])
         self.final_name_var.set(r["final_name"])
         self.lab_id_var.set(r.get("lab_id",""))
+        self._suspend_auto_apply = False
 
         self.files_list.delete(0, tk.END)
         for fp in r["files"]:
@@ -1545,13 +1661,6 @@ class ScanWindow(tk.Toplevel):
         self.rows[folder_key]["include"] = bool(self.include_var.get())
         self._refresh_tree_row(folder_key)
 
-    def auto_id_from_name(self):
-        name = self.final_name_var.get().strip()
-        if not name:
-            return
-        self.final_id_var.set(f"NAME:{name}")
-        self.apply_edits()
-
     def apply_edits(self):
         folder_key = self.sel_folder_var.get().strip()
         if not folder_key or folder_key not in self.rows:
@@ -1563,7 +1672,6 @@ class ScanWindow(tk.Toplevel):
 
         if not fid and fname:
             fid = f"NAME:{fname}"
-            self.final_id_var.set(fid)
 
         self.rows[folder_key]["final_id"] = fid
         self.rows[folder_key]["final_name"] = fname
@@ -1607,11 +1715,21 @@ class ScanWindow(tk.Toplevel):
             fid = (r["final_id"] or "").strip()
             fname = (r["final_name"] or "").strip()
             lab = (r.get("lab_id") or "").strip() or None
+
+            if not fname:
+                fname = "Unknown Student"
+            if not fid:
+                if fname and fname.lower() != "unknown student":
+                    fid = f"NAME:{fname}"
+                else:
+                    folder_hash = hashlib.sha1(folder_key.encode("utf-8", errors="ignore")).hexdigest()[:12]
+                    fid = f"UNKNOWN:{folder_hash}"
+
+            fid = build_student_key(fid, fname)
             student_ok = bool(fid and fname)
 
-            if student_ok:
-                upsert_student(self.con, fid, fname, lab, folder_key)
-                created_students += 1
+            upsert_student(self.con, fid, fname, lab, folder_key)
+            created_students += 1
 
             for fp in r["files"]:
                 p = Path(fp)
