@@ -1330,6 +1330,7 @@ class ScanWindow(tk.Toplevel):
         self.skim_delay_ms_var = tk.IntVar(value=300)
         self._skim_folder_idx = 0
         self._skim_file_idx = 0
+        self._skimmable_folder_keys: list[str] = []
 
         self._build()
 
@@ -1831,6 +1832,22 @@ class ScanWindow(tk.Toplevel):
         self.preview.focus_set()
         self._find_from = end
 
+    def _get_skimmable_folders(self) -> list[str]:
+        """
+        Skim only rows that are included and valid students with at least one file.
+        """
+        out = []
+        for folder_key in self.folder_order:
+            row = self.rows.get(folder_key) or {}
+            if not row.get("include"):
+                continue
+            if not (row.get("files") or []):
+                continue
+            if not has_required_student_fields(row.get("final_id", ""), row.get("final_name", "")):
+                continue
+            out.append(folder_key)
+        return out
+
     def _select_folder_by_index(self, idx: int):
         if idx < 0 or idx >= len(self.folder_order):
             return None
@@ -1855,6 +1872,12 @@ class ScanWindow(tk.Toplevel):
         if not self.folder_order:
             messagebox.showinfo("Skimming", "Scan first.")
             return
+
+        self._skimmable_folder_keys = self._get_skimmable_folders()
+        if not self._skimmable_folder_keys:
+            messagebox.showinfo("Skimming", "No included student folders with files to skim.")
+            return
+
         try:
             delay = int(self.skim_delay_ms_var.get())
         except Exception:
@@ -1864,8 +1887,8 @@ class ScanWindow(tk.Toplevel):
         self.skim_delay_ms_var.set(delay)
 
         current = self.sel_folder_var.get().strip()
-        if current in self.folder_order:
-            self._skim_folder_idx = self.folder_order.index(current)
+        if current in self._skimmable_folder_keys:
+            self._skim_folder_idx = self._skimmable_folder_keys.index(current)
         else:
             self._skim_folder_idx = 0
         self._skim_file_idx = 0
@@ -1883,19 +1906,14 @@ class ScanWindow(tk.Toplevel):
         if not self.skim_running:
             return
 
-        while self._skim_folder_idx < len(self.folder_order):
-            folder_key = self._select_folder_by_index(self._skim_folder_idx)
-            if not folder_key:
+        while self._skim_folder_idx < len(self._skimmable_folder_keys):
+            folder_key = self._skimmable_folder_keys[self._skim_folder_idx]
+            if not self._select_folder_by_index(self.folder_order.index(folder_key)):
                 self._skim_folder_idx += 1
                 self._skim_file_idx = 0
                 continue
 
             files = self.rows.get(folder_key, {}).get("files") or []
-            if not files:
-                self._skim_folder_idx += 1
-                self._skim_file_idx = 0
-                continue
-
             if self._skim_file_idx >= len(files):
                 self._skim_folder_idx += 1
                 self._skim_file_idx = 0
