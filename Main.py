@@ -43,6 +43,7 @@ from datetime import datetime
 import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
+import tkinter.font as tkfont
 
 from openpyxl import Workbook
 
@@ -76,9 +77,6 @@ except Exception:
 SUBMISSIONS_DB = "submissions.sqlite"
 
 DEFAULT_THEME = "Grade strictly. If unclear, give 0 and explain why."
-
-# Per your request: keep model/AI plumbing separate; leave default empty/off.
-DEFAULT_AI_ENABLED = True
 
 ID_DIGITS_RE = re.compile(r"\b\d{5,12}\b")
 
@@ -395,7 +393,8 @@ def submissions_db_init(con: sqlite3.Connection):
         student_id TEXT PRIMARY KEY,
         student_name TEXT NOT NULL,
         lab_id TEXT,
-        folder_path TEXT
+        folder_path TEXT,
+        included INTEGER NOT NULL DEFAULT 1
     );
 
     CREATE TABLE IF NOT EXISTS files (
@@ -407,7 +406,23 @@ def submissions_db_init(con: sqlite3.Connection):
         file_hash TEXT,
         file_content TEXT,
         last_seen TEXT,
-        FOREIGN KEY(student_id) REFERENCES students(student_id) ON DELETE SET NULL
+      FOREIGN KEY(student_id) REFERENCES students(student_id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS regex_profiles (
+        profile_name TEXT PRIMARY KEY,
+        settings_json TEXT NOT NULL,
+        updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS scan_sessions (
+        session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        committed_at TEXT,
+        root_folder TEXT,
+        lab_id TEXT,
+        regex_profile_name TEXT,
+        regex_settings_json TEXT,
+        session_payload_json TEXT
     );
     """)
     # Safe migration
@@ -415,6 +430,8 @@ def submissions_db_init(con: sqlite3.Connection):
         cols = [r[1] for r in con.execute("PRAGMA table_info(students)").fetchall()]
         if "lab_id" not in cols:
             con.execute("ALTER TABLE students ADD COLUMN lab_id TEXT;")
+        if "included" not in cols:
+            con.execute("ALTER TABLE students ADD COLUMN included INTEGER NOT NULL DEFAULT 1;")
     except Exception:
         pass
     con.commit()
@@ -431,15 +448,64 @@ def sub_meta_get(con: sqlite3.Connection, key: str, default: str = "") -> str:
     row = con.execute("SELECT meta_value FROM app_meta WHERE meta_key=?", (key,)).fetchone()
     return row[0] if row and row[0] is not None else default
 
-def upsert_student(con: sqlite3.Connection, student_id: str, student_name: str, lab_id: str | None, folder_path: str | None):
+def upsert_regex_profile(con: sqlite3.Connection, profile_name: str, payload: dict):
+    con.execute(
+        """
+        INSERT INTO regex_profiles(profile_name, settings_json, updated_at)
+        VALUES(?, ?, ?)
+        ON CONFLICT(profile_name) DO UPDATE SET
+          settings_json=excluded.settings_json,
+          updated_at=excluded.updated_at
+        """,
+        (profile_name, json.dumps(payload, ensure_ascii=False), now_ts()),
+    )
+    con.commit()
+
+def load_regex_profile(con: sqlite3.Connection, profile_name: str) -> dict | None:
+    row = con.execute("SELECT settings_json FROM regex_profiles WHERE profile_name=?", (profile_name,)).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return None
+
+def list_regex_profiles(con: sqlite3.Connection) -> list[str]:
+    rows = con.execute("SELECT profile_name FROM regex_profiles ORDER BY profile_name").fetchall()
+    return [r[0] for r in rows]
+
+def commit_scan_session(con: sqlite3.Connection, root_folder: str, lab_id: str, profile_name: str, profile_payload: dict, session_payload: dict):
+    con.execute(
+        """
+        INSERT INTO scan_sessions(committed_at, root_folder, lab_id, regex_profile_name, regex_settings_json, session_payload_json)
+        VALUES(?, ?, ?, ?, ?, ?)
+        """,
+        (
+            now_ts(),
+            root_folder,
+            lab_id,
+            profile_name,
+            json.dumps(profile_payload, ensure_ascii=False),
+            json.dumps(session_payload, ensure_ascii=False),
+        ),
+    )
+    con.commit()
+
+def upsert_student(con: sqlite3.Connection, student_id: str, student_name: str, lab_id: str | None, folder_path: str | None, included: bool = True):
     con.execute("""
-    INSERT INTO students(student_id, student_name, lab_id, folder_path)
-    VALUES(?, ?, ?, ?)
+    INSERT INTO students(student_id, student_name, lab_id, folder_path, included)
+    VALUES(?, ?, ?, ?, ?)
     ON CONFLICT(student_id) DO UPDATE SET
       student_name=excluded.student_name,
       lab_id=COALESCE(excluded.lab_id, students.lab_id),
-      folder_path=COALESCE(excluded.folder_path, students.folder_path)
-    """, (student_id, student_name, lab_id, folder_path))
+      folder_path=COALESCE(excluded.folder_path, students.folder_path),
+      included=excluded.included
+    """, (student_id, student_name, lab_id, folder_path, 1 if included else 0))
+    con.commit()
+
+
+def set_student_included(con: sqlite3.Connection, student_id: str, included: bool):
+    con.execute("UPDATE students SET included=? WHERE student_id=?", (1 if included else 0, student_id))
     con.commit()
 
 def upsert_file(con: sqlite3.Connection, file_path: str, student_id: str | None,
@@ -465,6 +531,7 @@ def get_students(con: sqlite3.Connection):
     SELECT s.student_id, s.student_name, COALESCE(s.lab_id,''),
            (SELECT COUNT(*) FROM files f WHERE f.student_id = s.student_id) AS file_count
     FROM students s
+    WHERE LOWER(s.student_id)='full' OR s.included=1
     ORDER BY CASE WHEN LOWER(s.student_id)='full' OR LOWER(s.student_name)='full' THEN 0 ELSE 1 END,
              s.student_id
     """)
@@ -799,6 +866,15 @@ def fetch_all_question_ids(con: sqlite3.Connection):
     rows = con.execute("SELECT question_id FROM rubric_questions ORDER BY question_id").fetchall()
     return [r[0] for r in rows]
 
+
+def fetch_rubric_parts(con: sqlite3.Connection):
+    rows = con.execute("""
+      SELECT question_id, col_key, COALESCE(col_group,''), col_text, col_max
+      FROM rubric_columns
+      ORDER BY question_id, col_order, col_key
+    """).fetchall()
+    return rows
+
 def compute_question_max(con: sqlite3.Connection, question_id: str) -> float:
     row = con.execute("""
       SELECT COALESCE(SUM(col_max),0)
@@ -815,23 +891,32 @@ def export_all_to_excel(sub_con: sqlite3.Connection, grade_con: sqlite3.Connecti
     question_ids = fetch_all_question_ids(grade_con)
     qmax = {qid: compute_question_max(grade_con, qid) for qid in question_ids}
 
-    ws_sum.append([
-        "Student ID", "Student Name", "LabID",
-        "Questions graded", "Overall raw"
-    ])
+    parts = fetch_rubric_parts(grade_con)
+    part_headers = [f"{qid}:{ck}" for qid, ck, _g, _t, _m in parts]
+
+    ws_sum.append(["Student ID", "Student Name", "LabID", *part_headers, *[f"{qid}_total" for qid in question_ids], "Overall raw"])
 
     students = sub_con.execute("""
       SELECT student_id, student_name, COALESCE(lab_id,'')
       FROM students
+      WHERE included=1 OR LOWER(student_id)='full'
       ORDER BY student_id
     """).fetchall()
 
     assessed_students = [r for r in students if not is_full_student(r[0])]
 
     for sid, sname, lab in assessed_students:
-        graded_count = grade_con.execute("SELECT COUNT(DISTINCT question_id) FROM rubric_scores WHERE student_id=?", (sid,)).fetchone()[0]
-        overall = compute_overall_total(grade_con, sid)
-        ws_sum.append([sid, sname, lab, graded_count, overall])
+        row = [sid, sname, lab]
+        score_cache = {}
+        for qid, ck, _g, _t, _m in parts:
+            if qid not in score_cache:
+                score_cache[qid] = load_student_scores(grade_con, sid, qid)[0]
+            val = score_cache[qid].get(ck)
+            row.append("" if val is None else val)
+        for qid in question_ids:
+            row.append(compute_total(grade_con, sid, qid))
+        row.append(compute_overall_total(grade_con, sid))
+        ws_sum.append(row)
 
     # Per-question sheets
     for qid in question_ids:
@@ -1261,6 +1346,7 @@ class PDFExporter:
         students = self.sub_con.execute("""
           SELECT student_id, student_name, COALESCE(lab_id,'')
           FROM students
+          WHERE included=1 OR LOWER(student_id)='full'
         """).fetchall()
 
         def key(r):
@@ -1268,13 +1354,25 @@ class PDFExporter:
             return (0 if sid.lower() == "full" else 1, sid)
         students = sorted(students, key=key)
 
-        td = [["Student ID", "Name", "LabID", "Questions graded", "Overall"]]
+        parts = fetch_rubric_parts(self.grade_con)
+        question_ids = fetch_all_question_ids(self.grade_con)
+        headers = ["Student ID", "Name", "LabID"] + [f"{qid}:{ck}" for qid, ck, _g, _t, _m in parts] + [f"{qid}_total" for qid in question_ids] + ["Overall"]
+        td = [headers]
         for sid, sname, lab in students:
-            graded_count = self.grade_con.execute("SELECT COUNT(DISTINCT question_id) FROM rubric_scores WHERE student_id=?", (sid,)).fetchone()[0]
+            score_cache = {}
+            row = [sid, sname, lab]
+            for qid, ck, _g, _t, _m in parts:
+                if qid not in score_cache:
+                    score_cache[qid] = load_student_scores(self.grade_con, sid, qid)[0]
+                val = score_cache[qid].get(ck)
+                row.append("" if val is None else f"{val:g}")
+            for qid in question_ids:
+                row.append(f"{compute_total(self.grade_con, sid, qid):g}")
             overall = compute_overall_total(self.grade_con, sid)
-            td.append([sid, sname, lab, str(graded_count), f"{overall:g}"])
+            row.append(f"{overall:g}")
+            td.append(row)
 
-        tbl = Table(td, colWidths=[90, 170, 80, 110, 80])
+        tbl = Table(td, repeatRows=1)
         tbl.setStyle(TableStyle([
             ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE5FF")),
             ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
@@ -1290,7 +1388,7 @@ class PDFExporter:
         students = self.sub_con.execute("""
           SELECT student_id, COALESCE(lab_id,'')
           FROM students
-          WHERE LOWER(student_id) <> 'full'
+          WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
           ORDER BY student_id
         """).fetchall()
 
@@ -1310,11 +1408,6 @@ class PDFExporter:
             if progress_cb:
                 progress_cb(i, len(students), sid, True, "")
 
-    def export_compare_to_full_pdfs(self, out_dir: Path, report_tag: str = "Midterm", progress_cb=None):
-        """
-        Alias for batch export naming used from the "Compare to FULL" workflow.
-        """
-        self.export_all_students_pdfs(out_dir=out_dir, report_tag=report_tag, progress_cb=progress_cb)
 
 
 # =============================================================================
@@ -1538,6 +1631,7 @@ class ScanWindow(tk.Toplevel):
         self._last_scan_file_selection: tuple[str, ...] = ()
 
         self._build()
+        self.apply_profile_settings(self.app.get_active_regex_payload())
         self.load_existing_rows_from_db()
         self.after(120, self._poll_scan_selections)
 
@@ -1551,7 +1645,8 @@ class ScanWindow(tk.Toplevel):
         ttk.Button(actions, text="Choose ROOT Folder", command=self.choose_root).pack(side=tk.LEFT)
         ttk.Button(actions, text="Scan / Rescan", command=self.scan).pack(side=tk.LEFT, padx=8)
 
-        ttk.Button(actions, text="Save Scan to DB", command=self.save_to_db).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="Commit", command=self.commit_current_scan).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="Save Scan to DB", command=self.save_to_db).pack(side=tk.RIGHT, padx=(0, 8))
 
         self.status_lbl = ttk.Label(actions, text="No folder selected.", style="Pastel.TLabel")
         self.status_lbl.pack(side=tk.RIGHT, padx=10)
@@ -1560,10 +1655,8 @@ class ScanWindow(tk.Toplevel):
         opts_nb.pack(fill=tk.X, pady=(8, 0))
 
         filters_tab = ttk.Frame(opts_nb, style="Pastel.TFrame", padding=8)
-        regex_tab = ttk.Frame(opts_nb, style="Pastel.TFrame", padding=8)
         skim_tab = ttk.Frame(opts_nb, style="Pastel.TFrame", padding=8)
         opts_nb.add(filters_tab, text="Scan Filters")
-        opts_nb.add(regex_tab, text="Regex")
         opts_nb.add(skim_tab, text="Skimming")
 
         ttk.Label(filters_tab, text="File globs (comma-separated)", style="Pastel.TLabel").pack(side=tk.LEFT)
@@ -1571,14 +1664,8 @@ class ScanWindow(tk.Toplevel):
         ttk.Label(filters_tab, text="Filename include-regex (optional)", style="Pastel.TLabel").pack(side=tk.LEFT)
         ttk.Entry(filters_tab, textvariable=self.filename_regex_var, width=34).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Checkbutton(filters_tab, text="Only show files not already registered", variable=self.only_new_files_var).pack(side=tk.LEFT, padx=(12, 0))
-
-        ttk.Label(regex_tab, text="Folder ID regex (cap group)", style="Pastel.TLabel").pack(side=tk.LEFT)
-        ttk.Entry(regex_tab, textvariable=self.folder_id_regex_var, width=24).pack(side=tk.LEFT, padx=(6, 12))
-        ttk.Label(regex_tab, text="Folder Name regex (cap group)", style="Pastel.TLabel").pack(side=tk.LEFT)
-        ttk.Entry(regex_tab, textvariable=self.folder_name_regex_var, width=32).pack(side=tk.LEFT, padx=(6, 12))
-        ttk.Button(regex_tab, text="Reset Regex", command=self.reset_regex_defaults).pack(side=tk.LEFT)
-        ttk.Button(regex_tab, text="Save Regex Copy", command=self.save_regex_copy).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(regex_tab, text="Load Regex Copy", command=self.load_regex_copy).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(filters_tab, text="Regex profile:", style="Pastel.TLabel").pack(side=tk.LEFT, padx=(12, 4))
+        ttk.Label(filters_tab, textvariable=self.app.active_regex_profile_var, style="Pastel.TLabel").pack(side=tk.LEFT)
 
         ttk.Label(skim_tab, text="Skim delay (ms)", style="Pastel.TLabel").pack(side=tk.LEFT)
         ttk.Entry(skim_tab, textvariable=self.skim_delay_ms_var, width=7).pack(side=tk.LEFT, padx=(6, 10))
@@ -1671,6 +1758,10 @@ class ScanWindow(tk.Toplevel):
         preview_frame.columnconfigure(0, weight=1)
 
         self.preview = tk.Text(preview_frame, wrap="none")
+        self.preview_font_normal = tkfont.Font(font=self.preview["font"])
+        self.preview_font_bold = tkfont.Font(font=self.preview["font"])
+        self.preview_font_bold.configure(weight="bold")
+        self.preview.configure(font=self.preview_font_normal)
         self.preview.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(preview_frame, orient="vertical", command=self.preview.yview)
         sb.grid(row=0, column=1, sticky="ns")
@@ -1719,6 +1810,7 @@ class ScanWindow(tk.Toplevel):
             self.tree.delete(item)
         for item in self.files_tree.get_children():
             self.files_tree.delete(item)
+        self.preview.configure(font=self.preview_font_normal)
         self.preview.delete("1.0", tk.END)
 
     def _parse_globs(self) -> list[str]:
@@ -1819,6 +1911,23 @@ class ScanWindow(tk.Toplevel):
             "folder_name_regex": (self.folder_name_regex_var.get() or "").strip(),
             "only_new_files": bool(self.only_new_files_var.get()),
         }
+
+    def apply_profile_settings(self, payload: dict):
+        self.file_globs_var.set((payload.get("file_globs") or "*.java").strip() or "*.java")
+        self.filename_regex_var.set((payload.get("filename_regex") or "").strip())
+        self.folder_id_regex_var.set((payload.get("folder_id_regex") or "").strip())
+        self.folder_name_regex_var.set((payload.get("folder_name_regex") or "").strip())
+        self.only_new_files_var.set(bool(payload.get("only_new_files", False)))
+
+    def commit_current_scan(self):
+        self.save_to_db(show_message=False)
+        payload_rows = [self.rows[k] for k in self.folder_order if k in self.rows]
+        self.app.commit_scan_session_from_window(
+            root_folder=str(self.root_folder or ""),
+            global_lab_id=(self.global_lab_id_var.get() or "").strip(),
+            session_rows=payload_rows,
+        )
+        messagebox.showinfo("Committed", "Current scan + profile committed to DB.")
 
     def save_regex_copy(self):
         path = filedialog.asksaveasfilename(
@@ -2114,6 +2223,7 @@ class ScanWindow(tk.Toplevel):
         for idx, fp in enumerate(r["files"]):
             self.files_tree.insert("", "end", iid=f"file-{idx}", values=(fp,))
 
+        self.preview.configure(font=self.preview_font_normal if bool(r.get("include")) else self.preview_font_bold)
         self.preview.delete("1.0", tk.END)
 
     def on_scan_file_select(self, _evt=None, file_iid: str | None = None):
@@ -2151,6 +2261,7 @@ class ScanWindow(tk.Toplevel):
         row["include"] = bool(self.include_var.get())
         row["manual_include_override"] = row["include"]
         self._refresh_tree_row(folder_key)
+        self.preview.configure(font=self.preview_font_normal if bool(row.get("include")) else self.preview_font_bold)
         self._reload_student_rows()
         self._set_scan_status(prefix="Scan info")
 
@@ -2184,6 +2295,7 @@ class ScanWindow(tk.Toplevel):
         self._suspend_auto_apply = False
 
         self._refresh_tree_row(folder_key)
+        self.preview.configure(font=self.preview_font_normal if bool(row.get("include")) else self.preview_font_bold)
         self._reload_student_rows()
         self._set_scan_status(prefix="Scan info")
 
@@ -2397,8 +2509,10 @@ class ScanWindow(tk.Toplevel):
         except Exception:
             pass
 
+        self._skim_total_files = sum(len(self.rows.get(k, {}).get("files") or []) for k in self._skimmable_folder_keys)
+        self._skim_seen_files = 0
         self._set_scan_status(prefix="Skimming started")
-        self._skim_step()
+        self.after(int(self.skim_delay_ms_var.get()), self._skim_step)
 
     def stop_skimming(self):
         if self.skim_running:
@@ -2447,12 +2561,13 @@ class ScanWindow(tk.Toplevel):
 
         selected = self._select_file_in_current_folder(self._skim_file_idx)
         if selected:
-            self._set_scan_status(prefix=f"Skimming: student {self._skim_folder_idx + 1}/{len(self._skimmable_folder_keys)}, file {self._skim_file_idx + 1}/{len(files)}")
+            self._skim_seen_files += 1
+            self._set_scan_status(prefix=f"Skimming: student {self._skim_folder_idx + 1}/{len(self._skimmable_folder_keys)}, file {self._skim_file_idx + 1}/{len(files)} (overall {self._skim_seen_files}/{max(1, self._skim_total_files)})")
 
         self._skim_file_idx += 1
         self.after(int(self.skim_delay_ms_var.get()), self._skim_step)
 
-    def save_to_db(self):
+    def save_to_db(self, show_message: bool = True):
         if not self.rows:
             self.load_existing_rows_from_db()
         if not self.rows:
@@ -2483,14 +2598,16 @@ class ScanWindow(tk.Toplevel):
                 normalized_sid = extract_numeric_id(normalized_sid)
 
             if include_row and student_ok and normalized_sid:
-                upsert_student(self.con, normalized_sid, fname, lab, r.get("folder") or folder_key)
+                upsert_student(self.con, normalized_sid, fname, lab, r.get("folder") or folder_key, included=True)
                 created_students += 1
             elif include_row and student_ok and (fid or "").strip().lower() == "full":
-                upsert_student(self.con, "FULL", fname or "FULL", lab, r.get("folder") or folder_key)
+                upsert_student(self.con, "FULL", fname or "FULL", lab, r.get("folder") or folder_key, included=True)
                 normalized_sid = "FULL"
                 created_students += 1
             elif not include_row:
                 skipped_folders += 1
+                if student_ok and normalized_sid:
+                    set_student_included(self.con, normalized_sid, False)
 
             for fp in r["files"]:
                 p = Path(fp)
@@ -2519,10 +2636,11 @@ class ScanWindow(tk.Toplevel):
             committed_folders += 1
 
         self.app.refresh_students(keep_selected=False)
-        messagebox.showinfo(
-            "Saved",
-            f"Folders committed: {committed_folders}\nFolders skipped: {skipped_folders}\nFiles saved: {committed_files}\nStudents created/updated: {created_students}"
-        )
+        if show_message:
+            messagebox.showinfo(
+                "Saved",
+                f"Folders committed: {committed_folders}\nFolders skipped: {skipped_folders}\nFiles saved: {committed_files}\nStudents created/updated: {created_students}"
+            )
 
 
 # =============================================================================
@@ -2565,8 +2683,11 @@ class App:
         # curve preview factor (histogram overlay)
         self.curve_preview_var = tk.DoubleVar(value=1.0)
 
-        # Optional auto-grader
-        self.auto_grader = AutoGrader(enabled=DEFAULT_AI_ENABLED)
+        # Regex profile state
+        self.active_regex_profile_var = tk.StringVar(value="Default")
+
+        # Optional auto-grader (user-invoked only)
+        self.auto_grader = AutoGrader(enabled=False)
 
         self._grade_last_student_selection: tuple[int, ...] = ()
         self._grade_last_file_selection: tuple[int, ...] = ()
@@ -2644,14 +2765,18 @@ class App:
         self.tab_grade = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_summary = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_stats = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
+        self.tab_regex = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
 
         self.nb.add(self.tab_grade, text="Grade")
         self.nb.add(self.tab_summary, text="Summary")
         self.nb.add(self.tab_stats, text="Stats")
+        self.nb.add(self.tab_regex, text="Regex / Patterns")
 
         self._build_grade_tab()
         self._build_summary_tab()
         self._build_stats_tab()
+        self._build_regex_tab()
+        self._ensure_default_regex_profile()
 
     def _build_grade_tab(self):
         main = ttk.Frame(self.tab_grade, style="Pastel.TFrame")
@@ -2690,8 +2815,6 @@ class App:
         codebar.grid(row=1, column=0, sticky="ew", pady=(6, 6))
         ttk.Button(codebar, text="Add comment to selection", command=self.add_comment_to_selection).pack(side=tk.LEFT)
         ttk.Button(codebar, text="Clear comments in selection", command=self.clear_comments_in_selection).pack(side=tk.LEFT, padx=6)
-        ttk.Button(codebar, text="Compare to FULL", command=self.compare_to_full).pack(side=tk.LEFT, padx=6)
-        ttk.Button(codebar, text="Export All (Compare-to-FULL naming)", command=self.export_compare_to_full_pdfs).pack(side=tk.LEFT, padx=6)
         ttk.Button(codebar, text="Export PDF (this student)", command=self.export_student_pdf).pack(side=tk.RIGHT)
 
         preview_frame = ttk.Frame(mid, style="PastelCard.TFrame")
@@ -2717,11 +2840,9 @@ class App:
         right.columnconfigure(0, weight=1)
         right.rowconfigure(14, weight=1)
 
-        ttk.Label(right, text="Question (from loaded scheme)", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
-        self.question_var = tk.StringVar(value="")
-        self.question_combo = ttk.Combobox(right, textvariable=self.question_var, state="readonly")
-        self.question_combo.grid(row=1, column=0, sticky="ew", pady=(4,8))
-        self.question_combo.bind("<<ComboboxSelected>>", self.on_question_select)
+        ttk.Label(right, text="Questions: all loaded rubric questions", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        self.question_mode_lbl = ttk.Label(right, text="All questions visible in Summary/exports", style="PastelCard.TLabel")
+        self.question_mode_lbl.grid(row=1, column=0, sticky="w", pady=(4,8))
 
         ttk.Separator(right, orient="horizontal").grid(row=2, column=0, sticky="ew", pady=(8,10))
 
@@ -2808,6 +2929,120 @@ class App:
                   text="Note: Curve preview uses multiplication factor (clipped at 0). It does not change stored grades unless you export/transform them externally.",
                   style="Pastel.TLabel").pack(anchor="w", pady=(8, 0))
 
+    def _default_regex_payload(self) -> dict:
+        return {
+            "file_globs": "*.java",
+            "filename_regex": "",
+            "folder_id_regex": "",
+            "folder_name_regex": "",
+            "only_new_files": False,
+            "student_id_regex": r"\b\d{5,12}\b",
+            "student_name_regex": r"",
+        }
+
+    def _ensure_default_regex_profile(self):
+        if not list_regex_profiles(self.sub_con):
+            upsert_regex_profile(self.sub_con, "Default", self._default_regex_payload())
+        names = list_regex_profiles(self.sub_con)
+        self.regex_profile_combo["values"] = names
+        active = sub_meta_get(self.sub_con, "active_regex_profile", "Default") or "Default"
+        if active not in names:
+            active = names[0]
+        self.active_regex_profile_var.set(active)
+        self.regex_profile_pick_var.set(active)
+        self.load_regex_profile_into_editor(active)
+
+    def get_active_regex_payload(self) -> dict:
+        name = self.active_regex_profile_var.get().strip() or "Default"
+        payload = load_regex_profile(self.sub_con, name)
+        return payload or self._default_regex_payload()
+
+    def _build_regex_tab(self):
+        top = ttk.Frame(self.tab_regex, style="Pastel.TFrame")
+        top.pack(fill=tk.X)
+        self.regex_profile_pick_var = tk.StringVar(value="Default")
+        ttk.Label(top, text="Load Profile", style="Pastel.TLabel").pack(side=tk.LEFT)
+        self.regex_profile_combo = ttk.Combobox(top, textvariable=self.regex_profile_pick_var, state="readonly", width=36)
+        self.regex_profile_combo.pack(side=tk.LEFT, padx=(6, 10))
+        self.regex_profile_combo.bind("<<ComboboxSelected>>", lambda _e: self.load_regex_profile_into_editor(self.regex_profile_pick_var.get()))
+        ttk.Button(top, text="Save Profile", command=self.save_regex_profile).pack(side=tk.LEFT)
+        ttk.Button(top, text="Save Copy As...", command=self.save_regex_profile_copy_as).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Commit", command=self.commit_regex_profile).pack(side=tk.LEFT)
+
+        form = ttk.Frame(self.tab_regex, style="Pastel.TFrame")
+        form.pack(fill=tk.X, pady=(10, 0))
+        self.regex_vars = {
+            "student_id_regex": tk.StringVar(value=r"\b\d{5,12}\b"),
+            "student_name_regex": tk.StringVar(value=""),
+            "folder_id_regex": tk.StringVar(value=""),
+            "folder_name_regex": tk.StringVar(value=""),
+            "filename_regex": tk.StringVar(value=""),
+            "file_globs": tk.StringVar(value="*.java"),
+        }
+        fields = [
+            ("Student ID extraction regex", "student_id_regex"),
+            ("Student name extraction regex", "student_name_regex"),
+            ("Optional folder ID regex", "folder_id_regex"),
+            ("Optional folder name regex", "folder_name_regex"),
+            ("Filename include regex", "filename_regex"),
+            ("Filename glob patterns (comma separated)", "file_globs"),
+        ]
+        for i, (label, key) in enumerate(fields):
+            ttk.Label(form, text=label, style="Pastel.TLabel").grid(row=i, column=0, sticky="w", pady=4)
+            ttk.Entry(form, textvariable=self.regex_vars[key], width=80).grid(row=i, column=1, sticky="ew", padx=(8, 0), pady=4)
+        form.columnconfigure(1, weight=1)
+
+    def _current_regex_payload_from_editor(self) -> dict:
+        return {
+            "student_id_regex": self.regex_vars["student_id_regex"].get().strip(),
+            "student_name_regex": self.regex_vars["student_name_regex"].get().strip(),
+            "folder_id_regex": self.regex_vars["folder_id_regex"].get().strip(),
+            "folder_name_regex": self.regex_vars["folder_name_regex"].get().strip(),
+            "filename_regex": self.regex_vars["filename_regex"].get().strip(),
+            "file_globs": self.regex_vars["file_globs"].get().strip() or "*.java",
+            "only_new_files": False,
+        }
+
+    def load_regex_profile_into_editor(self, profile_name: str):
+        payload = load_regex_profile(self.sub_con, profile_name) or self._default_regex_payload()
+        for k, v in self.regex_vars.items():
+            v.set(str(payload.get(k, "")))
+        self.regex_profile_pick_var.set(profile_name)
+
+    def save_regex_profile(self):
+        name = self.regex_profile_pick_var.get().strip()
+        if not name:
+            return
+        upsert_regex_profile(self.sub_con, name, self._current_regex_payload_from_editor())
+        self._ensure_default_regex_profile()
+
+    def save_regex_profile_copy_as(self):
+        name = simpledialog.askstring("Save Profile Copy", "New profile name:")
+        if not name:
+            return
+        upsert_regex_profile(self.sub_con, name.strip(), self._current_regex_payload_from_editor())
+        self._ensure_default_regex_profile()
+        self.regex_profile_pick_var.set(name.strip())
+
+    def commit_regex_profile(self):
+        name = (self.regex_profile_pick_var.get() or "Default").strip() or "Default"
+        upsert_regex_profile(self.sub_con, name, self._current_regex_payload_from_editor())
+        self.active_regex_profile_var.set(name)
+        sub_meta_set(self.sub_con, "active_regex_profile", name)
+        sub_meta_set(self.sub_con, "active_regex_payload", json.dumps(self._current_regex_payload_from_editor()))
+        messagebox.showinfo("Committed", f"Committed regex profile for scans: {name}")
+
+    def commit_scan_session_from_window(self, root_folder: str, global_lab_id: str, session_rows: list[dict]):
+        name = self.active_regex_profile_var.get().strip() or "Default"
+        payload = load_regex_profile(self.sub_con, name) or self._default_regex_payload()
+        commit_scan_session(
+            self.sub_con,
+            root_folder=root_folder,
+            lab_id=global_lab_id,
+            profile_name=name,
+            profile_payload=payload,
+            session_payload={"rows": session_rows},
+        )
     # ---- scan window ----
     def open_scan_window(self):
         return ScanWindow(self)
@@ -2937,28 +3172,14 @@ class App:
     def refresh_question_picker_for_student(self):
         if self.grade_con is None:
             return
-
         allowed = list(self.question_map.keys())
-        items = [f"{qid} — {self.question_map[qid]}" for qid in allowed if qid in self.question_map]
-        self.question_combo["values"] = items
-
-        if not items:
+        if not allowed:
             self.selected_question_id = None
-            self.question_var.set("")
             return
-
         if not self.selected_question_id or self.selected_question_id not in self.question_map:
-            self.selected_question_id = items[0].split(" — ", 1)[0].strip()
-            self.question_var.set(items[0])
-            try:
-                self.question_combo.current(0)
-            except Exception:
-                pass
+            self.selected_question_id = allowed[0]
 
     def on_question_select(self, _evt=None):
-        v = self.question_var.get().strip()
-        if " — " in v:
-            self.selected_question_id = v.split(" — ", 1)[0].strip()
         self.load_student_question_view()
 
     # ---- theme ----
@@ -3098,30 +3319,6 @@ class App:
         delete_code_comments_in_range(self.grade_con, self.selected_student_id, self.selected_file_path, sidx, eidx)
         self._apply_comments_highlights()
 
-    def compare_to_full(self):
-        if not self.selected_student_id:
-            return
-        full_id = "FULL"
-        full_exists = self.sub_con.execute(
-            "SELECT 1 FROM students WHERE LOWER(student_id)='full' LIMIT 1"
-        ).fetchone()
-        if not full_exists:
-            messagebox.showinfo("No FULL", "No student with ID 'FULL' exists in submissions DB.")
-            return
-
-        import difflib
-        a = merge_student_code(self.sub_con, full_id).splitlines()
-        b = merge_student_code(self.sub_con, self.selected_student_id).splitlines()
-        diff = difflib.unified_diff(a, b, fromfile="FULL", tofile=self.selected_student_id, lineterm="")
-        text = "\n".join(diff) or "(No differences detected.)"
-
-        win = tk.Toplevel(self.root)
-        win.title(f"Diff: FULL vs {self.selected_student_id}")
-        win.geometry("1400x800")
-        t = tk.Text(win, wrap="none", bg="#0f111a", fg="#e6e6e6", insertbackground="#e6e6e6")
-        t.pack(fill=tk.BOTH, expand=True)
-        t.insert("1.0", text)
-
     # ---- load rubric table for selected student + question ----
     def load_student_question_view(self):
         self.rationale_text.delete("1.0", tk.END)
@@ -3193,10 +3390,6 @@ class App:
         if not self.selected_student_id or not self.selected_question_id:
             messagebox.showinfo("Missing", "Select a student and a question first.")
             return
-        if not self.auto_grader.enabled:
-            messagebox.showinfo("Disabled", "Auto grading is disabled (optional component).")
-            return
-
         cols = fetch_columns_for_question(self.grade_con, self.selected_question_id)
         rubric_items = [{"col_key": col_key, "group": (group or ""), "criterion": text, "max_points": float(mx)}
                         for col_key, group, text, mx in cols]
@@ -3286,7 +3479,7 @@ class App:
             return []
         rows = self.sub_con.execute("""
           SELECT student_id FROM students
-          WHERE LOWER(student_id) <> 'full'
+          WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
         """).fetchall()
         vals = []
         for (sid,) in rows:
@@ -3294,40 +3487,51 @@ class App:
         return vals
 
     def compute_class_stats_text(self):
-        vals = self.compute_class_values()
+        vals = sorted(self.compute_class_values())
         if not vals:
             return "Class Stats: (not available)"
-        avg = sum(vals) / len(vals)
-        mn = min(vals)
-        mx = max(vals)
-        med = sorted(vals)[len(vals)//2]
-        variance = sum((v - avg) ** 2 for v in vals) / len(vals)
+        n = len(vals)
+        avg = sum(vals) / n
+        mn = vals[0]
+        mx = vals[-1]
+        med = vals[n//2] if n % 2 else (vals[n//2 - 1] + vals[n//2]) / 2.0
+        q1 = vals[n//4]
+        q3 = vals[(3*n)//4]
+        variance = sum((v - avg) ** 2 for v in vals) / n
         std = math.sqrt(variance)
+        overall_max = sum(compute_question_max(self.grade_con, qid) for qid in fetch_all_question_ids(self.grade_con)) if self.grade_con else 0.0
+        zeros = sum(1 for v in vals if v <= 0.0001)
+        perfects = sum(1 for v in vals if overall_max > 0 and abs(v - overall_max) < 1e-6)
         target_avg = 75.0
         curve_factor = (target_avg / avg) if avg > 0 else 1.0
-        return f"Class Stats: avg {avg:.2f} | median {med:.2f} | std {std:.2f} | min {mn:.2f} | max {mx:.2f} | suggested curve× {curve_factor:.3f}"
+        return (
+            f"Class Stats: avg {avg:.2f} | median {med:.2f} | std {std:.2f} | min {mn:.2f} | max {mx:.2f} "
+            f"| Q1 {q1:.2f} | Q3 {q3:.2f} | zeros {zeros} | perfect {perfects} | suggested curve× {curve_factor:.3f}"
+        )
 
     def refresh_histogram(self):
         if self.hist_canvas is None or self.hist_ax is None:
             return
-        vals = self.compute_class_values()
+        vals = sorted(self.compute_class_values())
         self.hist_ax.clear()
         if not vals:
             self.hist_ax.set_title("No class data")
             self.hist_canvas.draw()
             return
-
+        import numpy as np
+        counts, bins = np.histogram(vals, bins=min(12, max(5, len(vals)//2)))
+        centers = (bins[:-1] + bins[1:]) / 2
+        self.hist_ax.plot(centers, counts, marker="o", label="distribution")
+        if len(counts) >= 3:
+            kernel = np.array([0.25, 0.5, 0.25])
+            smoothed = np.convolve(counts, kernel, mode="same")
+            self.hist_ax.plot(centers, smoothed, linestyle="--", label="smoothed")
         k = float(self.curve_preview_var.get())
-        curved = [max(0.0, v * k) for v in vals]
-
-        # No explicit colors (per your preference earlier for charts); matplotlib defaults
-        self.hist_ax.hist(vals, bins=12, alpha=0.6, label="raw")
-        self.hist_ax.hist(curved, bins=12, alpha=0.6, label=f"curved×{k:.2f}")
-        mean_val = sum(vals) / len(vals)
-        med_val = sorted(vals)[len(vals)//2]
-        self.hist_ax.axvline(mean_val, linestyle="--", linewidth=1.5, label=f"mean {mean_val:.2f}")
-        self.hist_ax.axvline(med_val, linestyle=":", linewidth=1.5, label=f"median {med_val:.2f}")
-        self.hist_ax.set_title("Overall totals distribution")
+        curved_vals = [max(0.0, v * k) for v in vals]
+        c_counts, c_bins = np.histogram(curved_vals, bins=bins)
+        c_centers = (c_bins[:-1] + c_bins[1:]) / 2
+        self.hist_ax.plot(c_centers, c_counts, alpha=0.75, label=f"curve preview ×{k:.2f}")
+        self.hist_ax.set_title("Score distribution (line curve)")
         self.hist_ax.set_xlabel("Overall total")
         self.hist_ax.set_ylabel("Count")
         self.hist_ax.legend()
@@ -3344,28 +3548,39 @@ class App:
         for item in self.sum_tree.get_children():
             self.sum_tree.delete(item)
 
+        question_ids = fetch_all_question_ids(self.grade_con)
+        parts = fetch_rubric_parts(self.grade_con)
+        cols = ["student_id", "student_name", "lab_id"] + [f"{qid}:{ck}" for qid, ck, _g, _t, _m in parts] + [f"{qid}_total" for qid in question_ids] + ["overall", "overall_curved"]
+        self.sum_tree.configure(columns=cols)
+        for c in cols:
+            self.sum_tree.heading(c, text=c)
+            self.sum_tree.column(c, width=110 if c not in {"student_name"} else 180, anchor="w")
+
         students = self.sub_con.execute("""
           SELECT student_id, student_name, COALESCE(lab_id,'')
           FROM students
-          WHERE LOWER(student_id) <> 'full'
+          WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
           ORDER BY student_id
         """).fetchall()
 
         curve_k = float(self.curve_preview_var.get())
-
         for sid, sname, lab in students:
-            graded_count = self.grade_con.execute("SELECT COUNT(DISTINCT question_id) FROM rubric_scores WHERE student_id=?", (sid,)).fetchone()[0]
+            row = [sid, sname, lab]
+            score_cache = {}
+            for qid, ck, _g, _t, _m in parts:
+                if qid not in score_cache:
+                    score_cache[qid] = load_student_scores(self.grade_con, sid, qid)[0]
+                v = score_cache[qid].get(ck)
+                row.append("" if v is None else f"{v:g}")
+            for qid in question_ids:
+                row.append(f"{compute_total(self.grade_con, sid, qid):g}")
             overall = compute_overall_total(self.grade_con, sid)
-            curved = max(0.0, overall * curve_k)
-            self.sum_tree.insert(
-                "", "end",
-                values=(sid, sname, lab, graded_count, f"{overall:g}", f"{curved:.2f}")
-            )
+            row.append(f"{overall:g}")
+            row.append(f"{max(0.0, overall * curve_k):.2f}")
+            self.sum_tree.insert("", "end", values=row)
 
         stats_text = self.compute_class_stats_text()
-        # Also keep your original suggested curve factor in the top label (separate from preview)
         self.class_stats_lbl.config(text=stats_text.replace("Class Stats:", "Class:"))
-
         self.refresh_histogram()
 
     # ---- PDF Exports ----
@@ -3458,54 +3673,6 @@ class App:
 
         try:
             exporter.export_all_students_pdfs(Path(out_dir), report_tag=report_tag, progress_cb=progress_cb)
-        except Exception as e:
-            messagebox.showerror("Batch export failed", str(e))
-            prog.destroy()
-            return
-
-        prog.destroy()
-        messagebox.showinfo("Done", f"Saved PDFs to:\n{out_dir}")
-
-    def export_compare_to_full_pdfs(self):
-        if not self.require_grading_db():
-            return
-        if SimpleDocTemplate is None:
-            messagebox.showinfo("PDF missing", "reportlab not installed. Install: pip install reportlab")
-            return
-
-        out_dir = filedialog.askdirectory(title="Choose output folder (Compare-to-FULL naming)")
-        if not out_dir:
-            return
-
-        report_tag = simpledialog.askstring(
-            "Report tag",
-            "Enter report tag (example: Midterm):",
-            initialvalue="Midterm"
-        )
-        if report_tag is None:
-            return
-
-        exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map)
-
-        prog = tk.Toplevel(self.root)
-        prog.title("Exporting Compare-to-FULL PDFs...")
-        prog.geometry("520x140")
-        lbl = ttk.Label(prog, text="Starting...", style="Pastel.TLabel")
-        lbl.pack(pady=10)
-        pb = ttk.Progressbar(prog, orient="horizontal", length=480, mode="determinate")
-        pb.pack(pady=10)
-
-        def progress_cb(i, n, sid, ok, err):
-            pb["maximum"] = n
-            pb["value"] = i
-            if ok:
-                lbl.config(text=f"[{i}/{n}] Exported: {sid}")
-            else:
-                lbl.config(text=f"[{i}/{n}] Failed: {sid} ({err})")
-            prog.update_idletasks()
-
-        try:
-            exporter.export_compare_to_full_pdfs(Path(out_dir), report_tag=report_tag, progress_cb=progress_cb)
         except Exception as e:
             messagebox.showerror("Batch export failed", str(e))
             prog.destroy()
