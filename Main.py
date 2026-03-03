@@ -290,11 +290,11 @@ def infer_student_for_folder(
 
     if detected_id or detected_name:
         if detected_id:
-            final_name = detected_name or "Unknown Student"
+            final_name = (detected_name or "").strip()
             final_id = build_student_key(detected_id, final_name)
         else:
-            final_name = (detected_name or "Unknown Student").strip()
-            final_id = f"NAME:{final_name}"
+            final_name = (detected_name or "").strip()
+            final_id = f"NAME:{final_name}" if final_name else ""
 
     return final_id, final_name, (detected_id or ""), (detected_name or ""), [str(p) for p in files]
 
@@ -1637,6 +1637,7 @@ class ScanWindow(tk.Toplevel):
             self.folder_order.append(folder_key)
             self.rows[folder_key] = {
                 "include": include_row,
+                "manual_include_override": None,
                 "folder": folder_key,
                 "det_id": sid or "",
                 "det_name": sname or "",
@@ -1700,6 +1701,7 @@ class ScanWindow(tk.Toplevel):
             include_row = bool(files) and is_student
             self.rows[folder_key] = {
                 "include": include_row,
+                "manual_include_override": None,
                 "folder": folder_key,
                 "det_id": det_id or "",
                 "det_name": det_name or "",
@@ -1773,11 +1775,14 @@ class ScanWindow(tk.Toplevel):
         is_student = has_required_student_fields(row.get("final_id", ""), row.get("final_name", ""))
         if not files or not is_student:
             row["include"] = False
+            row["manual_include_override"] = False
             self.include_var.set(False)
             self._refresh_tree_row(folder_key)
             self._set_scan_status(prefix="Scan info")
             return
+
         row["include"] = bool(self.include_var.get())
+        row["manual_include_override"] = row["include"]
         self._refresh_tree_row(folder_key)
         self._set_scan_status(prefix="Scan info")
 
@@ -1797,9 +1802,14 @@ class ScanWindow(tk.Toplevel):
 
         is_student = has_required_student_fields(fid, fname)
         has_files = bool(self.rows[folder_key].get("files"))
-        self.rows[folder_key]["include"] = bool(self.rows[folder_key].get("include")) and has_files and is_student
-        if is_student and has_files:
-            # If user just completed ID + Name, include it by default.
+        manual_override = self.rows[folder_key].get("manual_include_override")
+
+        if not (has_files and is_student):
+            self.rows[folder_key]["include"] = False
+        elif manual_override is False:
+            self.rows[folder_key]["include"] = False
+        else:
+            # If row is valid and user did not manually exclude it, include it.
             self.rows[folder_key]["include"] = True
 
         self._suspend_auto_apply = True
@@ -1893,16 +1903,12 @@ class ScanWindow(tk.Toplevel):
 
     def _get_skimmable_folders(self) -> list[str]:
         """
-        Skim only rows that are included and valid students with at least one file.
+        Skim every folder that has at least one file so names/IDs can be verified quickly.
         """
         out = []
         for folder_key in self.folder_order:
             row = self.rows.get(folder_key) or {}
-            if not row.get("include"):
-                continue
             if not (row.get("files") or []):
-                continue
-            if not has_required_student_fields(row.get("final_id", ""), row.get("final_name", "")):
                 continue
             out.append(folder_key)
         return out
@@ -1929,12 +1935,14 @@ class ScanWindow(tk.Toplevel):
 
     def start_skimming(self):
         if not self.folder_order:
-            messagebox.showinfo("Skimming", "Scan first.")
+            self.load_existing_rows_from_db()
+        if not self.folder_order:
+            messagebox.showinfo("Skimming", "No rows loaded. Scan folders or load from DB first.")
             return
 
         self._skimmable_folder_keys = self._get_skimmable_folders()
         if not self._skimmable_folder_keys:
-            messagebox.showinfo("Skimming", "No included student folders with files to skim.")
+            messagebox.showinfo("Skimming", "No folders with files to skim.")
             return
 
         try:
@@ -1990,7 +1998,9 @@ class ScanWindow(tk.Toplevel):
 
     def save_to_db(self):
         if not self.rows:
-            messagebox.showinfo("Nothing", "Scan first.")
+            self.load_existing_rows_from_db()
+        if not self.rows:
+            messagebox.showinfo("Nothing", "No rows loaded. Scan folders or load from DB first.")
             return
 
         store_content = self.store_file_content.get()
