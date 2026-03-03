@@ -929,7 +929,12 @@ def compute_question_max(con: sqlite3.Connection, question_id: str) -> float:
     """, (question_id,)).fetchone()
     return float(row[0] if row else 0.0)
 
-def export_all_to_excel(sub_con: sqlite3.Connection, grade_con: sqlite3.Connection, out_path: Path):
+def export_all_to_excel(
+    sub_con: sqlite3.Connection,
+    grade_con: sqlite3.Connection,
+    out_path: Path,
+    student_filter: set[str] | None = None,
+):
     wb = Workbook()
     ws_sum = wb.active
     ws_sum.title = "Brightspace_Summary"
@@ -950,6 +955,8 @@ def export_all_to_excel(sub_con: sqlite3.Connection, grade_con: sqlite3.Connecti
     """).fetchall()
 
     assessed_students = [r for r in students if not is_full_student(r[0])]
+    if student_filter is not None:
+        assessed_students = [r for r in assessed_students if r[0] in student_filter]
 
     for sid, sname, lab in assessed_students:
         row = [sid, sname, lab]
@@ -1006,7 +1013,7 @@ def export_all_to_excel(sub_con: sqlite3.Connection, grade_con: sqlite3.Connecti
 
     # Reference model row if FULL exists
     full_row = next((r for r in students if is_full_student(r[0])), None)
-    if full_row:
+    if full_row and student_filter is None:
         sid, sname, lab = full_row
         ws_full = wb.create_sheet(title="FULL_Model")
         ws_full.append(["Student ID", "Student Name", "LabID", "Overall raw"])
@@ -2908,7 +2915,7 @@ class App:
         ttk.Button(btns, text="Auto Grade (optional)", command=self.auto_grade_optional).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Save (this question)", command=self.save_scores_and_rationale).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Autofill/Test (assigned × all students)", command=self.make_all_assigned).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
-        ttk.Button(btns, text="Export Excel (all)", command=self.save_all_excel).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(btns, text="Export Grade (selected student)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
 
         ttk.Label(right, text="Rationale (per student, per question)", style="PastelCard.TLabel").grid(row=8, column=0, sticky="w")
         self.rationale_text = tk.Text(right, height=6,
@@ -2934,11 +2941,8 @@ class App:
         top.pack(fill=tk.X)
 
         ttk.Button(top, text="Refresh Summary", command=self.refresh_summary).pack(side=tk.LEFT)
-        ttk.Button(top, text="Export Grade (selected)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6)
-        ttk.Button(top, text="Export Grades (all students)", command=self.save_all_excel).pack(side=tk.LEFT, padx=6)
-        ttk.Button(top, text="Export PDF (selected)", command=self.export_student_pdf).pack(side=tk.LEFT, padx=6)
-        ttk.Button(top, text="Export PDFs (all students)", command=self.export_all_students_pdfs).pack(side=tk.LEFT, padx=6)
-        ttk.Button(top, text="Auto Export Pack", command=self.auto_export_pack).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Export Grade (selected student)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Export This Student PDF", command=self.export_student_pdf).pack(side=tk.LEFT, padx=6)
 
         cols = ("student_id", "student_name", "lab_id", "graded_questions", "overall", "overall_curved")
         self.sum_tree = ttk.Treeview(self.tab_summary, columns=cols, show="headings", height=25)
@@ -2948,9 +2952,11 @@ class App:
             self.sum_tree.column(c, width=w, anchor="w")
         self.sum_tree.pack(fill=tk.BOTH, expand=True, pady=(10,0))
 
-        note = ttk.Label(self.tab_summary,
-                         text="Tip: the special FULL student is used as a model answer reference and excluded from student grading lists.",
-                         style="Pastel.TLabel")
+        note = ttk.Label(
+            self.tab_summary,
+            text="Summary includes only students marked as included. The table shows rubric points, per-question totals, and overall totals.",
+            style="Pastel.TLabel"
+        )
         note.pack(anchor="w", pady=(8,0))
 
     def _build_stats_tab(self):
@@ -3615,8 +3621,13 @@ class App:
         if not out:
             return
 
-        export_all_to_excel(self.sub_con, self.grade_con, Path(out))
-        messagebox.showinfo("Exported", f"Saved:\n{out}\n\nTip: use sheet filters to keep only {self.selected_student_id} rows.")
+        export_all_to_excel(
+            self.sub_con,
+            self.grade_con,
+            Path(out),
+            student_filter={self.selected_student_id},
+        )
+        messagebox.showinfo("Exported", f"Saved selected student grade export:\n{out}")
 
     # ---- Summary + class stats + histogram ----
     def compute_class_values(self):
