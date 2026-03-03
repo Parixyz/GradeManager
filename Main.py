@@ -2160,9 +2160,9 @@ class ScanWindow(tk.Toplevel):
 
     def _selected_folder_from_tree(self) -> str | None:
         sel = self.tree.selection()
-        folder_key = sel[0] if sel else self.tree.focus()
-        if not folder_key:
+        if not sel:
             return None
+        folder_key = sel[0]
         return folder_key if folder_key in self.rows else None
 
     def _build_skimmable_sequence(self, start_folder_key: str | None) -> list[str]:
