@@ -1330,8 +1330,10 @@ class ScanWindow(tk.Toplevel):
         self.skim_delay_ms_var = tk.IntVar(value=300)
         self._skim_folder_idx = 0
         self._skim_file_idx = 0
+        self._skimmable_folder_keys: list[str] = []
 
         self._build()
+        self.load_existing_rows_from_db()
 
     def _build(self):
         top = ttk.Frame(self, padding=10, style="Pastel.TFrame")
@@ -1604,6 +1606,64 @@ class ScanWindow(tk.Toplevel):
         self.only_new_files_var.set(bool(payload.get("only_new_files", False)))
         messagebox.showinfo("Loaded", f"Regex copy loaded:\n{path}")
 
+    def load_existing_rows_from_db(self):
+        """
+        Populate Scan/Edit with current submissions DB rows.
+        """
+        self.rows.clear()
+        self.folder_order.clear()
+
+        students = self.con.execute("""
+            SELECT student_id, student_name, COALESCE(lab_id,''), COALESCE(folder_path,'')
+            FROM students
+            ORDER BY student_id
+        """).fetchall()
+
+        used_keys = set()
+        for sid, sname, lab, folder_path in students:
+            files = [r[0] for r in self.con.execute(
+                "SELECT file_path FROM files WHERE student_id=? ORDER BY file_path", (sid,)
+            ).fetchall()]
+
+            base_key = (folder_path or "").strip() or f"DB:{sid}"
+            folder_key = base_key
+            n = 2
+            while folder_key in used_keys:
+                folder_key = f"{base_key}#{n}"
+                n += 1
+            used_keys.add(folder_key)
+
+            include_row = bool(files) and has_required_student_fields(sid, sname)
+            self.folder_order.append(folder_key)
+            self.rows[folder_key] = {
+                "include": include_row,
+                "folder": folder_key,
+                "det_id": sid or "",
+                "det_name": sname or "",
+                "final_id": sid or "",
+                "final_name": sname or "",
+                "lab_id": lab or "",
+                "files": files,
+            }
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        for folder_key in self.folder_order:
+            r = self.rows[folder_key]
+            self.tree.insert("", "end", iid=folder_key, values=(
+                "YES" if r["include"] else "NO",
+                Path(r["folder"]).name,
+                r["det_id"],
+                r["det_name"],
+                r["final_id"],
+                r["final_name"],
+                r.get("lab_id", ""),
+                str(len(r["files"]))
+            ))
+
+        self._set_scan_status(prefix="Loaded from DB")
+
     def scan(self):
         if not self.root_folder:
             messagebox.showinfo("Pick folder", "Choose ROOT folder first.")
@@ -1831,6 +1891,22 @@ class ScanWindow(tk.Toplevel):
         self.preview.focus_set()
         self._find_from = end
 
+    def _get_skimmable_folders(self) -> list[str]:
+        """
+        Skim only rows that are included and valid students with at least one file.
+        """
+        out = []
+        for folder_key in self.folder_order:
+            row = self.rows.get(folder_key) or {}
+            if not row.get("include"):
+                continue
+            if not (row.get("files") or []):
+                continue
+            if not has_required_student_fields(row.get("final_id", ""), row.get("final_name", "")):
+                continue
+            out.append(folder_key)
+        return out
+
     def _select_folder_by_index(self, idx: int):
         if idx < 0 or idx >= len(self.folder_order):
             return None
@@ -1855,6 +1931,12 @@ class ScanWindow(tk.Toplevel):
         if not self.folder_order:
             messagebox.showinfo("Skimming", "Scan first.")
             return
+
+        self._skimmable_folder_keys = self._get_skimmable_folders()
+        if not self._skimmable_folder_keys:
+            messagebox.showinfo("Skimming", "No included student folders with files to skim.")
+            return
+
         try:
             delay = int(self.skim_delay_ms_var.get())
         except Exception:
@@ -1864,8 +1946,8 @@ class ScanWindow(tk.Toplevel):
         self.skim_delay_ms_var.set(delay)
 
         current = self.sel_folder_var.get().strip()
-        if current in self.folder_order:
-            self._skim_folder_idx = self.folder_order.index(current)
+        if current in self._skimmable_folder_keys:
+            self._skim_folder_idx = self._skimmable_folder_keys.index(current)
         else:
             self._skim_folder_idx = 0
         self._skim_file_idx = 0
@@ -1883,19 +1965,14 @@ class ScanWindow(tk.Toplevel):
         if not self.skim_running:
             return
 
-        while self._skim_folder_idx < len(self.folder_order):
-            folder_key = self._select_folder_by_index(self._skim_folder_idx)
-            if not folder_key:
+        while self._skim_folder_idx < len(self._skimmable_folder_keys):
+            folder_key = self._skimmable_folder_keys[self._skim_folder_idx]
+            if not self._select_folder_by_index(self.folder_order.index(folder_key)):
                 self._skim_folder_idx += 1
                 self._skim_file_idx = 0
                 continue
 
             files = self.rows.get(folder_key, {}).get("files") or []
-            if not files:
-                self._skim_folder_idx += 1
-                self._skim_file_idx = 0
-                continue
-
             if self._skim_file_idx >= len(files):
                 self._skim_folder_idx += 1
                 self._skim_file_idx = 0
@@ -2038,6 +2115,12 @@ class App:
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
 
+        ttk.Button(top, text="New Submissions DB...", command=self.new_submissions_db).pack(side=tk.LEFT)
+        ttk.Button(top, text="Open Submissions DB...", command=self.open_submissions_db).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Save Submissions DB As...", command=self.save_submissions_db_as).pack(side=tk.LEFT, padx=6)
+
+        ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
+
         ttk.Button(top, text="New Grading DB...", command=self.new_grading_db).pack(side=tk.LEFT)
         ttk.Button(top, text="Open Grading DB...", command=self.open_grading_db).pack(side=tk.LEFT, padx=6)
 
@@ -2047,6 +2130,9 @@ class App:
         ttk.Button(top, text="Reload Last Scheme", command=self.reload_last_scheme).pack(side=tk.LEFT, padx=6)
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
+
+        self.sub_db_status_lbl = ttk.Label(top, text=f"Submissions DB: {self.sub_db_path.name}", style="Pastel.TLabel")
+        self.sub_db_status_lbl.pack(side=tk.LEFT, padx=10)
 
         self.db_status_lbl = ttk.Label(top, text="Grading DB: (none)", style="Pastel.TLabel")
         self.db_status_lbl.pack(side=tk.LEFT, padx=10)
@@ -2239,6 +2325,67 @@ class App:
     # ---- scan window ----
     def open_scan_window(self):
         return ScanWindow(self)
+
+    # ---- submissions DB open/create/save ----
+    def new_submissions_db(self):
+        path = filedialog.asksaveasfilename(
+            title="Create submissions DB",
+            defaultextension=".sqlite",
+            filetypes=[("SQLite DB", "*.sqlite"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        self._open_submissions_db(Path(path))
+
+    def open_submissions_db(self):
+        path = filedialog.askopenfilename(
+            title="Open submissions DB",
+            filetypes=[("SQLite DB", "*.sqlite"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        self._open_submissions_db(Path(path))
+
+    def save_submissions_db_as(self):
+        path = filedialog.asksaveasfilename(
+            title="Save submissions DB as",
+            defaultextension=".sqlite",
+            filetypes=[("SQLite DB", "*.sqlite"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+
+        target = Path(path)
+        try:
+            out_con = db_connect(target)
+            self.sub_con.backup(out_con)
+            out_con.close()
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+            return
+
+        self._open_submissions_db(target)
+        messagebox.showinfo("Saved", f"Submissions DB saved to:\n{target}")
+
+    def _open_submissions_db(self, path: Path):
+        if self.sub_con is not None:
+            try:
+                self.sub_con.close()
+            except Exception:
+                pass
+
+        self.sub_db_path = path
+        self.sub_con = db_connect(path)
+        submissions_db_init(self.sub_con)
+        self.sub_db_status_lbl.config(text=f"Submissions DB: {path.name}")
+
+        self.selected_student_id = None
+        self.selected_file_path = None
+        self.refresh_students(keep_selected=False)
+        self.refresh_summary()
+        self.preview.delete("1.0", tk.END)
+        self.file_list.delete(0, tk.END)
+        self.comment_list.delete(0, tk.END)
 
     # ---- grading DB open/create ----
     def new_grading_db(self):
