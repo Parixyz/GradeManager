@@ -2328,9 +2328,11 @@ class App:
         self.sub_db_path = Path(SUBMISSIONS_DB)
         self.sub_con = db_connect(self.sub_db_path)
         submissions_db_init(self.sub_con)
+        grading_db_init(self.sub_con)
 
-        self.grade_db_path: Path | None = None
-        self.grade_con: sqlite3.Connection | None = None
+        # Grading data is stored in the same submissions DB.
+        self.grade_db_path: Path | None = self.sub_db_path
+        self.grade_con: sqlite3.Connection | None = self.sub_con
 
         self.student_ids: list[str] = []
         self.selected_student_id: str | None = None
@@ -2350,8 +2352,9 @@ class App:
 
     def require_grading_db(self) -> bool:
         if self.grade_con is None:
-            messagebox.showinfo("No grading DB", "Create/Open a grading DB first.")
-            return False
+            self.grade_con = self.sub_con
+            self.grade_db_path = self.sub_db_path
+            grading_db_init(self.grade_con)
         return True
 
     def _build_ui(self):
@@ -2368,11 +2371,6 @@ class App:
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
 
-        ttk.Button(top, text="New Grading DB...", command=self.new_grading_db).pack(side=tk.LEFT)
-        ttk.Button(top, text="Open Grading DB...", command=self.open_grading_db).pack(side=tk.LEFT, padx=6)
-
-        ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
-
         ttk.Button(top, text="Load Scheme CSV...", command=self.load_scheme_csv).pack(side=tk.LEFT)
         ttk.Button(top, text="Reload Last Scheme", command=self.reload_last_scheme).pack(side=tk.LEFT, padx=6)
 
@@ -2381,7 +2379,7 @@ class App:
         self.sub_db_status_lbl = ttk.Label(top, text=f"Submissions DB: {self.sub_db_path.name}", style="Pastel.TLabel")
         self.sub_db_status_lbl.pack(side=tk.LEFT, padx=10)
 
-        self.db_status_lbl = ttk.Label(top, text="Grading DB: (none)", style="Pastel.TLabel")
+        self.db_status_lbl = ttk.Label(top, text=f"Grading: integrated with {self.sub_db_path.name}", style="Pastel.TLabel")
         self.db_status_lbl.pack(side=tk.LEFT, padx=10)
 
         self.student_count_lbl = ttk.Label(top, text="Students: 0", style="Pastel.TLabel")
@@ -2624,7 +2622,17 @@ class App:
         self.sub_db_path = path
         self.sub_con = db_connect(path)
         submissions_db_init(self.sub_con)
+        grading_db_init(self.sub_con)
+        self.grade_con = self.sub_con
+        self.grade_db_path = self.sub_db_path
+
         self.sub_db_status_lbl.config(text=f"Submissions DB: {path.name}")
+        self.db_status_lbl.config(text=f"Grading: integrated with {path.name}")
+
+        theme = meta_get(self.grade_con, "theme", DEFAULT_THEME)
+        self.theme_text.delete("1.0", tk.END)
+        self.theme_text.insert("1.0", theme)
+        self.refresh_question_lists()
 
         self.selected_student_id = None
         self.selected_file_path = None
@@ -2636,44 +2644,13 @@ class App:
 
     # ---- grading DB open/create ----
     def new_grading_db(self):
-        path = filedialog.asksaveasfilename(
-            title="Create grading DB",
-            defaultextension=".sqlite",
-            filetypes=[("SQLite DB", "*.sqlite"), ("All files", "*.*")]
-        )
-        if not path:
-            return
-        self._open_grade_db(Path(path))
+        messagebox.showinfo("Integrated DB", "Grading data is stored in the current submissions DB.")
 
     def open_grading_db(self):
-        path = filedialog.askopenfilename(
-            title="Open grading DB",
-            filetypes=[("SQLite DB", "*.sqlite"), ("All files", "*.*")]
-        )
-        if not path:
-            return
-        self._open_grade_db(Path(path))
+        messagebox.showinfo("Integrated DB", "Grading data is stored in the current submissions DB.")
 
     def _open_grade_db(self, path: Path):
-        if self.grade_con is not None:
-            try:
-                self.grade_con.close()
-            except Exception:
-                pass
-
-        self.grade_db_path = path
-        self.grade_con = db_connect(path)
-        grading_db_init(self.grade_con)
-
-        theme = meta_get(self.grade_con, "theme", DEFAULT_THEME)
-        self.theme_text.delete("1.0", tk.END)
-        self.theme_text.insert("1.0", theme)
-
-        self.refresh_question_lists()
-        self.db_status_lbl.config(text=f"Grading DB: {path.name}")
-
-        self.load_student_question_view()
-        self.refresh_summary()
+        messagebox.showinfo("Integrated DB", "Grading data is stored in the current submissions DB.")
 
     # ---- Scheme CSV loading ----
     def load_scheme_csv(self):
@@ -2760,6 +2737,8 @@ class App:
         self.student_ids = []
 
         for sid, name, lab, file_count in rows:
+            if (sid or "").strip().lower() == "full":
+                continue
             lab_txt = f" | Lab:{lab}" if lab else ""
             self.student_list.insert(tk.END, f"{sid} — {name}{lab_txt} | files: {file_count}")
             self.student_ids.append(sid)
@@ -2881,7 +2860,10 @@ class App:
         if not self.selected_student_id:
             return
         full_id = "FULL"
-        if full_id not in self.student_ids:
+        full_exists = self.sub_con.execute(
+            "SELECT 1 FROM students WHERE LOWER(student_id)='full' LIMIT 1"
+        ).fetchone()
+        if not full_exists:
             messagebox.showinfo("No FULL", "No student with ID 'FULL' exists in submissions DB.")
             return
 
