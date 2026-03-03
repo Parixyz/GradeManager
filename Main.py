@@ -1584,6 +1584,22 @@ class ScanWindow(tk.Toplevel):
             return
         self.apply_edits()
 
+    @staticmethod
+    def _normalized_name(name: str, folder_label: str, detected_name: str = "") -> str:
+        """
+        Keep blank names blank.
+        Do not auto-store folder names as student names when nothing was detected.
+        """
+        cleaned = re.sub(r"\s+", " ", (name or "").strip())
+        if not cleaned:
+            return ""
+
+        folder_base = (Path(folder_label).name if folder_label else "").strip()
+        detected = re.sub(r"\s+", " ", (detected_name or "").strip())
+        if folder_base and cleaned == folder_base and not detected:
+            return ""
+        return cleaned
+
     def _scan_settings_payload(self) -> dict:
         return {
             "file_globs": (self.file_globs_var.get() or "").strip() or "*.java",
@@ -1721,7 +1737,11 @@ class ScanWindow(tk.Toplevel):
             det_id = (grp.get("det_id") or "").strip()
             det_name = (grp.get("det_name") or "").strip()
             final_id = sid if student_row else det_id
-            final_name = (student_row["name"] if student_row else det_name) or Path(folder_path).name
+            final_name = self._normalized_name(
+                student_row["name"] if student_row else det_name,
+                folder_path,
+                det_name,
+            )
             lab = student_row["lab"] if student_row else (grp.get("lab_id") or "")
 
             include_row = bool(files) and has_required_student_fields(final_id, final_name)
@@ -1753,7 +1773,7 @@ class ScanWindow(tk.Toplevel):
                 "det_id": sid or "",
                 "det_name": sname or "",
                 "final_id": sid or "",
-                "final_name": sname or "",
+                "final_name": self._normalized_name(sname or "", base_key, sname or ""),
                 "lab_id": lab or "",
                 "files": [],
             }
@@ -1819,7 +1839,7 @@ class ScanWindow(tk.Toplevel):
                 "det_id": det_id or "",
                 "det_name": det_name or "",
                 "final_id": final_id or "",
-                "final_name": final_name or (Path(sub).name if not files else ""),
+                "final_name": self._normalized_name(final_name or "", str(sub), det_name or ""),
                 "lab_id": "",
                 "files": files,
             }
@@ -1827,7 +1847,11 @@ class ScanWindow(tk.Toplevel):
             prior = existing_rows.get(folder_key)
             if prior:
                 self.rows[folder_key]["final_id"] = prior.get("final_id", self.rows[folder_key]["final_id"])
-                self.rows[folder_key]["final_name"] = prior.get("final_name", self.rows[folder_key]["final_name"])
+                self.rows[folder_key]["final_name"] = self._normalized_name(
+                    prior.get("final_name", self.rows[folder_key]["final_name"]),
+                    folder_key,
+                    self.rows[folder_key].get("det_name", ""),
+                )
                 self.rows[folder_key]["lab_id"] = prior.get("lab_id", "")
                 self.rows[folder_key]["manual_include_override"] = prior.get("manual_include_override")
 
@@ -1922,7 +1946,7 @@ class ScanWindow(tk.Toplevel):
 
         raw_fid = self.final_id_var.get().strip()
         fid = "FULL" if raw_fid.lower() == "full" else extract_numeric_id(raw_fid)
-        fname = self.final_name_var.get().strip()
+        fname = self._normalized_name(self.final_name_var.get(), folder_key, self.rows[folder_key].get("det_name", ""))
         lab = self.lab_id_var.get().strip()
 
         self.rows[folder_key]["final_id"] = fid
@@ -1941,6 +1965,7 @@ class ScanWindow(tk.Toplevel):
 
         self._suspend_auto_apply = True
         self.include_var.set(bool(self.rows[folder_key]["include"]))
+        self.final_name_var.set(fname)
         self._suspend_auto_apply = False
 
         self._refresh_tree_row(folder_key)
@@ -1975,6 +2000,7 @@ class ScanWindow(tk.Toplevel):
             self.lab_id_var.set(self.rows[current].get("lab_id", ""))
             self._suspend_auto_apply = False
 
+        self._reload_student_rows()
         self._set_scan_status(prefix="Scan info")
 
     def _selected_preview_text(self) -> str:
@@ -2147,6 +2173,14 @@ class ScanWindow(tk.Toplevel):
         self._skim_folder_idx = 0
         self._skim_file_idx = 0
         self.skim_running = True
+        first_folder, first_file_idx = self._skim_steps[0]
+        try:
+            first_folder_idx = self.folder_order.index(first_folder)
+            self._select_folder_by_index(first_folder_idx)
+            if first_file_idx is not None:
+                self._select_file_in_current_folder(first_file_idx)
+        except Exception:
+            pass
         self._set_scan_status(prefix="Skimming started")
         self._skim_step()
 
