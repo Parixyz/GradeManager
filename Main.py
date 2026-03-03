@@ -37,6 +37,7 @@ import re
 import sqlite3
 import hashlib
 import math
+import random
 from pathlib import Path
 from datetime import datetime
 import json
@@ -105,6 +106,9 @@ def extract_numeric_id(raw: str) -> str:
         return ""
     m = ID_DIGITS_RE.search(text)
     return m.group(0) if m else ""
+
+def is_full_student(student_id: str) -> bool:
+    return (student_id or "").strip().lower() == "full"
 
 
 # =============================================================================
@@ -822,7 +826,9 @@ def export_all_to_excel(sub_con: sqlite3.Connection, grade_con: sqlite3.Connecti
       ORDER BY student_id
     """).fetchall()
 
-    for sid, sname, lab in students:
+    assessed_students = [r for r in students if not is_full_student(r[0])]
+
+    for sid, sname, lab in assessed_students:
         graded_count = grade_con.execute("SELECT COUNT(DISTINCT question_id) FROM rubric_scores WHERE student_id=?", (sid,)).fetchone()[0]
         overall = compute_overall_total(grade_con, sid)
         ws_sum.append([sid, sname, lab, graded_count, overall])
@@ -847,7 +853,7 @@ def export_all_to_excel(sub_con: sqlite3.Connection, grade_con: sqlite3.Connecti
             header.append("Note")
         ws.append(header)
 
-        for sid, sname, lab in students:
+        for sid, sname, lab in assessed_students:
             total = compute_total(grade_con, sid, qid)
             note_row = load_student_note(grade_con, sid, qid)
             rationale = note_row[0] if note_row and note_row[0] else ""
@@ -859,6 +865,28 @@ def export_all_to_excel(sub_con: sqlite3.Connection, grade_con: sqlite3.Connecti
                 row.append("" if score_map.get(col_key) is None else score_map.get(col_key))
                 row.append(note_map.get(col_key, "") or "")
             ws.append(row)
+
+    # Code comment sheet (highlighted ranges + comment text)
+    ws_comments = wb.create_sheet(title="Code_Comments")
+    ws_comments.append(["Student ID", "Student Name", "Code (file)", "Highlighted part", "Comment", "Time"])
+    for sid, sname, _lab in assessed_students:
+        for fp, sidx, eidx, txt, _color, ts in fetch_code_comments_for_student(grade_con, sid):
+            ws_comments.append([sid, sname, Path(fp).name, f"{sidx}–{eidx}", txt or "", ts or ""])
+
+    # Reference model row if FULL exists
+    full_row = next((r for r in students if is_full_student(r[0])), None)
+    if full_row:
+        sid, sname, lab = full_row
+        ws_full = wb.create_sheet(title="FULL_Model")
+        ws_full.append(["Student ID", "Student Name", "LabID", "Overall raw"])
+        ws_full.append([sid, sname, lab, compute_overall_total(grade_con, sid)])
+
+        ws_full.append([])
+        ws_full.append(["Question", "Total", "Rationale"])
+        for qid in question_ids:
+            qtotal = compute_total(grade_con, sid, qid)
+            nrow = load_student_note(grade_con, sid, qid)
+            ws_full.append([qid, qtotal, nrow[0] if nrow and nrow[0] else ""])
 
     # light formatting
     for ws in wb.worksheets:
@@ -1106,6 +1134,7 @@ class PDFExporter:
         students = self.sub_con.execute("""
           SELECT student_id
           FROM students
+          WHERE LOWER(student_id) <> 'full'
           ORDER BY student_id
         """).fetchall()
         for i, (sid,) in enumerate(students, start=1):
@@ -2470,7 +2499,6 @@ class App:
         self.preview.configure(yscrollcommand=sb.set)
 
         self.preview.tag_configure("comment_highlight", background="#FFF2B2")
-        self.preview.tag_configure("comment_highlight2", background="#DFF6FF")
 
         # RIGHT grading
         right = ttk.Frame(main, style="PastelCard.TFrame", padding=10)
@@ -2527,8 +2555,10 @@ class App:
         top.pack(fill=tk.X)
 
         ttk.Button(top, text="Refresh Summary", command=self.refresh_summary).pack(side=tk.LEFT)
-        ttk.Button(top, text="Export PDF (summary)", command=self.export_summary_pdf).pack(side=tk.LEFT, padx=6)
-        ttk.Button(top, text="Export PDFs (ALL students)", command=self.export_all_students_pdfs).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Export Grade (selected)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Export Grades (all students)", command=self.save_all_excel).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Export PDF (selected)", command=self.export_student_pdf).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Export PDFs (all students)", command=self.export_all_students_pdfs).pack(side=tk.LEFT, padx=6)
 
         cols = ("student_id", "student_name", "lab_id", "graded_questions", "overall", "overall_curved")
         self.sum_tree = ttk.Treeview(self.tab_summary, columns=cols, show="headings", height=25)
@@ -2539,7 +2569,7 @@ class App:
         self.sum_tree.pack(fill=tk.BOTH, expand=True, pady=(10,0))
 
         note = ttk.Label(self.tab_summary,
-                         text="Tip: create a student named/ID 'FULL' as your reference solution; it’s pinned to the top.",
+                         text="Tip: the special FULL student is used as a model answer reference and excluded from student grading lists.",
                          style="Pastel.TLabel")
         note.pack(anchor="w", pady=(8,0))
 
@@ -2801,7 +2831,6 @@ class App:
     # ---- code comments ----
     def _apply_comments_highlights(self):
         self.preview.tag_remove("comment_highlight", "1.0", tk.END)
-        self.preview.tag_remove("comment_highlight2", "1.0", tk.END)
         self.comment_list.delete(0, tk.END)
 
         if self.grade_con is None:
@@ -2810,8 +2839,8 @@ class App:
             return
 
         comments = fetch_code_comments_for_file(self.grade_con, self.selected_student_id, self.selected_file_path)
-        for i, (cid, sidx, eidx, text, color, _created_at) in enumerate(comments):
-            tag = "comment_highlight" if (i % 2 == 0) else "comment_highlight2"
+        for cid, sidx, eidx, text, color, _created_at in comments:
+            tag = "comment_highlight"
             if color:
                 try:
                     self.preview.tag_configure(tag, background=color)
@@ -3017,6 +3046,24 @@ class App:
         export_all_to_excel(self.sub_con, self.grade_con, Path(out))
         messagebox.showinfo("Exported", f"Saved:\n{out}")
 
+    def export_selected_excel(self):
+        if not self.require_grading_db():
+            return
+        if not self.selected_student_id:
+            messagebox.showinfo("Select", "Select a student first.")
+            return
+
+        out = filedialog.asksaveasfilename(
+            title="Export selected student's grades (Excel)",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx")]
+        )
+        if not out:
+            return
+
+        export_all_to_excel(self.sub_con, self.grade_con, Path(out))
+        messagebox.showinfo("Exported", f"Saved:\n{out}\n\nTip: use sheet filters to keep only {self.selected_student_id} rows.")
+
     # ---- Summary + class stats + histogram ----
     def compute_class_values(self):
         """
@@ -3087,13 +3134,9 @@ class App:
         students = self.sub_con.execute("""
           SELECT student_id, student_name, COALESCE(lab_id,'')
           FROM students
+          WHERE LOWER(student_id) <> 'full'
           ORDER BY student_id
         """).fetchall()
-
-        def key(r):
-            sid = (r[0] or "")
-            return (0 if sid.lower() == "full" else 1, sid)
-        students = sorted(students, key=key)
 
         curve_k = float(self.curve_preview_var.get())
 
