@@ -491,7 +491,7 @@ def commit_scan_session(con: sqlite3.Connection, root_folder: str, lab_id: str, 
     )
     con.commit()
 
-def upsert_student(con: sqlite3.Connection, student_id: str, student_name: str, lab_id: str | None, folder_path: str | None, included: bool = True):
+def upsert_student(con: sqlite3.Connection, student_id: str, student_name: str, lab_id: str | None, folder_path: str | None):
     con.execute("""
     INSERT INTO students(student_id, student_name, lab_id, folder_path, included)
     VALUES(?, ?, ?, ?, ?)
@@ -2223,7 +2223,7 @@ class ScanWindow(tk.Toplevel):
         for idx, fp in enumerate(r["files"]):
             self.files_tree.insert("", "end", iid=f"file-{idx}", values=(fp,))
 
-        self.preview.configure(font=self.preview_font_normal if bool(r.get("include")) else self.preview_font_bold)
+        self.preview.configure(bg="#FFF9C4" if not bool(r.get("include")) else "#FFFDF7")
         self.preview.delete("1.0", tk.END)
 
     def on_scan_file_select(self, _evt=None, file_iid: str | None = None):
@@ -2261,7 +2261,7 @@ class ScanWindow(tk.Toplevel):
         row["include"] = bool(self.include_var.get())
         row["manual_include_override"] = row["include"]
         self._refresh_tree_row(folder_key)
-        self.preview.configure(font=self.preview_font_normal if bool(row.get("include")) else self.preview_font_bold)
+        self.preview.configure(bg="#FFF9C4" if not bool(row.get("include")) else "#FFFDF7")
         self._reload_student_rows()
         self._set_scan_status(prefix="Scan info")
 
@@ -2295,7 +2295,7 @@ class ScanWindow(tk.Toplevel):
         self._suspend_auto_apply = False
 
         self._refresh_tree_row(folder_key)
-        self.preview.configure(font=self.preview_font_normal if bool(row.get("include")) else self.preview_font_bold)
+        self.preview.configure(bg="#FFF9C4" if not bool(row.get("include")) else "#FFFDF7")
         self._reload_student_rows()
         self._set_scan_status(prefix="Scan info")
 
