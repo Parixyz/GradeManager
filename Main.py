@@ -96,6 +96,17 @@ def read_file_text(p: Path) -> str:
     return p.read_text(encoding="utf-8", errors="ignore")
 
 
+def extract_numeric_id(raw: str) -> str:
+    """
+    Keep only the numeric student ID portion.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    m = ID_DIGITS_RE.search(text)
+    return m.group(0) if m else ""
+
+
 # =============================================================================
 # 1) Student detection from Java header comments
 # =============================================================================
@@ -290,22 +301,21 @@ def infer_student_for_folder(
 
 def build_student_key(student_id: str, student_name: str) -> str:
     """
-    Build a stable student key that keeps both ID and name so counts do not
-    collapse when IDs are repeated across differently named submissions.
+    Build a stable student key.
+    Numeric IDs are always stored as numeric-only keys.
     """
-    sid = (student_id or "").strip()
+    raw_sid = (student_id or "").strip()
+    if raw_sid.startswith("NAME:"):
+        return raw_sid
+    if raw_sid.lower() == "full":
+        return raw_sid
+
+    sid = extract_numeric_id(raw_sid)
     sname = re.sub(r"\s+", " ", (student_name or "").strip())
 
     if not sid:
         return f"NAME:{sname}" if sname else ""
-    if sid.startswith("NAME:"):
-        return sid
-    if sid.lower() == "full":
-        return sid
-    if not sname or sname.lower() == "unknown student":
-        return sid
-
-    return f"{sid} | {sname}"
+    return sid
 
 
 class FolderScannerBase:
@@ -1747,11 +1757,14 @@ class ScanWindow(tk.Toplevel):
         if not folder_key or folder_key not in self.rows:
             return
 
-        fid = self.final_id_var.get().strip()
+        raw_fid = self.final_id_var.get().strip()
+        fid = extract_numeric_id(raw_fid)
         fname = self.final_name_var.get().strip()
         lab = self.lab_id_var.get().strip()
 
-        if not fid and fname:
+        if not fid and raw_fid.startswith("NAME:"):
+            fid = raw_fid
+        elif not fid and fname:
             fid = f"NAME:{fname}"
 
         self.rows[folder_key]["final_id"] = fid
@@ -1805,7 +1818,10 @@ class ScanWindow(tk.Toplevel):
         selected = self._selected_preview_text()
         if not selected:
             return
-        self.final_id_var.set(selected)
+        only_id = extract_numeric_id(selected)
+        if not only_id:
+            return
+        self.final_id_var.set(only_id)
 
     def use_selection_as_name(self):
         selected = self._selected_preview_text()
@@ -1861,17 +1877,23 @@ class ScanWindow(tk.Toplevel):
             fname = (r["final_name"] or "").strip()
             lab = (r.get("lab_id") or "").strip() or None
 
+            fid_digits = extract_numeric_id(fid)
+
+            # Skip rows that still have neither a numeric ID nor a name.
+            if not fid_digits and not fname:
+                skipped_folders += 1
+                continue
+
+            if fid_digits:
+                fid = fid_digits
+            elif fname:
+                fid = f"NAME:{fname}"
+
             if not fname:
                 fname = "Unknown Student"
-            if not fid:
-                if fname and fname.lower() != "unknown student":
-                    fid = f"NAME:{fname}"
-                else:
-                    folder_hash = hashlib.sha1(folder_key.encode("utf-8", errors="ignore")).hexdigest()[:12]
-                    fid = f"UNKNOWN:{folder_hash}"
 
             fid = build_student_key(fid, fname)
-            student_ok = bool(fid and fname)
+            student_ok = bool(fid)
 
             upsert_student(self.con, fid, fname, lab, folder_key)
             created_students += 1
