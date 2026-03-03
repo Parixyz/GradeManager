@@ -43,6 +43,7 @@ from datetime import datetime
 import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
+import tkinter.font as tkfont
 
 from openpyxl import Workbook
 
@@ -392,7 +393,8 @@ def submissions_db_init(con: sqlite3.Connection):
         student_id TEXT PRIMARY KEY,
         student_name TEXT NOT NULL,
         lab_id TEXT,
-        folder_path TEXT
+        folder_path TEXT,
+        included INTEGER NOT NULL DEFAULT 1
     );
 
     CREATE TABLE IF NOT EXISTS files (
@@ -428,6 +430,8 @@ def submissions_db_init(con: sqlite3.Connection):
         cols = [r[1] for r in con.execute("PRAGMA table_info(students)").fetchall()]
         if "lab_id" not in cols:
             con.execute("ALTER TABLE students ADD COLUMN lab_id TEXT;")
+        if "included" not in cols:
+            con.execute("ALTER TABLE students ADD COLUMN included INTEGER NOT NULL DEFAULT 1;")
     except Exception:
         pass
     con.commit()
@@ -489,13 +493,19 @@ def commit_scan_session(con: sqlite3.Connection, root_folder: str, lab_id: str, 
 
 def upsert_student(con: sqlite3.Connection, student_id: str, student_name: str, lab_id: str | None, folder_path: str | None):
     con.execute("""
-    INSERT INTO students(student_id, student_name, lab_id, folder_path)
-    VALUES(?, ?, ?, ?)
+    INSERT INTO students(student_id, student_name, lab_id, folder_path, included)
+    VALUES(?, ?, ?, ?, ?)
     ON CONFLICT(student_id) DO UPDATE SET
       student_name=excluded.student_name,
       lab_id=COALESCE(excluded.lab_id, students.lab_id),
-      folder_path=COALESCE(excluded.folder_path, students.folder_path)
-    """, (student_id, student_name, lab_id, folder_path))
+      folder_path=COALESCE(excluded.folder_path, students.folder_path),
+      included=excluded.included
+    """, (student_id, student_name, lab_id, folder_path, 1 if included else 0))
+    con.commit()
+
+
+def set_student_included(con: sqlite3.Connection, student_id: str, included: bool):
+    con.execute("UPDATE students SET included=? WHERE student_id=?", (1 if included else 0, student_id))
     con.commit()
 
 def upsert_file(con: sqlite3.Connection, file_path: str, student_id: str | None,
@@ -521,6 +531,7 @@ def get_students(con: sqlite3.Connection):
     SELECT s.student_id, s.student_name, COALESCE(s.lab_id,''),
            (SELECT COUNT(*) FROM files f WHERE f.student_id = s.student_id) AS file_count
     FROM students s
+    WHERE LOWER(s.student_id)='full' OR s.included=1
     ORDER BY CASE WHEN LOWER(s.student_id)='full' OR LOWER(s.student_name)='full' THEN 0 ELSE 1 END,
              s.student_id
     """)
@@ -888,6 +899,7 @@ def export_all_to_excel(sub_con: sqlite3.Connection, grade_con: sqlite3.Connecti
     students = sub_con.execute("""
       SELECT student_id, student_name, COALESCE(lab_id,'')
       FROM students
+      WHERE included=1 OR LOWER(student_id)='full'
       ORDER BY student_id
     """).fetchall()
 
@@ -1334,6 +1346,7 @@ class PDFExporter:
         students = self.sub_con.execute("""
           SELECT student_id, student_name, COALESCE(lab_id,'')
           FROM students
+          WHERE included=1 OR LOWER(student_id)='full'
         """).fetchall()
 
         def key(r):
@@ -1375,7 +1388,7 @@ class PDFExporter:
         students = self.sub_con.execute("""
           SELECT student_id, COALESCE(lab_id,'')
           FROM students
-          WHERE LOWER(student_id) <> 'full'
+          WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
           ORDER BY student_id
         """).fetchall()
 
@@ -1745,6 +1758,10 @@ class ScanWindow(tk.Toplevel):
         preview_frame.columnconfigure(0, weight=1)
 
         self.preview = tk.Text(preview_frame, wrap="none")
+        self.preview_font_normal = tkfont.Font(font=self.preview["font"])
+        self.preview_font_bold = tkfont.Font(font=self.preview["font"])
+        self.preview_font_bold.configure(weight="bold")
+        self.preview.configure(font=self.preview_font_normal)
         self.preview.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(preview_frame, orient="vertical", command=self.preview.yview)
         sb.grid(row=0, column=1, sticky="ns")
@@ -1793,6 +1810,7 @@ class ScanWindow(tk.Toplevel):
             self.tree.delete(item)
         for item in self.files_tree.get_children():
             self.files_tree.delete(item)
+        self.preview.configure(font=self.preview_font_normal)
         self.preview.delete("1.0", tk.END)
 
     def _parse_globs(self) -> list[str]:
@@ -2491,8 +2509,10 @@ class ScanWindow(tk.Toplevel):
         except Exception:
             pass
 
+        self._skim_total_files = sum(len(self.rows.get(k, {}).get("files") or []) for k in self._skimmable_folder_keys)
+        self._skim_seen_files = 0
         self._set_scan_status(prefix="Skimming started")
-        self._skim_step()
+        self.after(int(self.skim_delay_ms_var.get()), self._skim_step)
 
     def stop_skimming(self):
         if self.skim_running:
@@ -2541,7 +2561,8 @@ class ScanWindow(tk.Toplevel):
 
         selected = self._select_file_in_current_folder(self._skim_file_idx)
         if selected:
-            self._set_scan_status(prefix=f"Skimming: student {self._skim_folder_idx + 1}/{len(self._skimmable_folder_keys)}, file {self._skim_file_idx + 1}/{len(files)}")
+            self._skim_seen_files += 1
+            self._set_scan_status(prefix=f"Skimming: student {self._skim_folder_idx + 1}/{len(self._skimmable_folder_keys)}, file {self._skim_file_idx + 1}/{len(files)} (overall {self._skim_seen_files}/{max(1, self._skim_total_files)})")
 
         self._skim_file_idx += 1
         self.after(int(self.skim_delay_ms_var.get()), self._skim_step)
@@ -2577,14 +2598,16 @@ class ScanWindow(tk.Toplevel):
                 normalized_sid = extract_numeric_id(normalized_sid)
 
             if include_row and student_ok and normalized_sid:
-                upsert_student(self.con, normalized_sid, fname, lab, r.get("folder") or folder_key)
+                upsert_student(self.con, normalized_sid, fname, lab, r.get("folder") or folder_key, included=True)
                 created_students += 1
             elif include_row and student_ok and (fid or "").strip().lower() == "full":
-                upsert_student(self.con, "FULL", fname or "FULL", lab, r.get("folder") or folder_key)
+                upsert_student(self.con, "FULL", fname or "FULL", lab, r.get("folder") or folder_key, included=True)
                 normalized_sid = "FULL"
                 created_students += 1
             elif not include_row:
                 skipped_folders += 1
+                if student_ok and normalized_sid:
+                    set_student_included(self.con, normalized_sid, False)
 
             for fp in r["files"]:
                 p = Path(fp)
@@ -3456,7 +3479,7 @@ class App:
             return []
         rows = self.sub_con.execute("""
           SELECT student_id FROM students
-          WHERE LOWER(student_id) <> 'full'
+          WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
         """).fetchall()
         vals = []
         for (sid,) in rows:
@@ -3536,7 +3559,7 @@ class App:
         students = self.sub_con.execute("""
           SELECT student_id, student_name, COALESCE(lab_id,'')
           FROM students
-          WHERE LOWER(student_id) <> 'full'
+          WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
           ORDER BY student_id
         """).fetchall()
 
