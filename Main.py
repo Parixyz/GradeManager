@@ -1331,6 +1331,7 @@ class ScanWindow(tk.Toplevel):
         self._skim_folder_idx = 0
         self._skim_file_idx = 0
         self._skimmable_folder_keys: list[str] = []
+        self.selected_folder_key: str | None = None
 
         self._build()
         self.load_existing_rows_from_db()
@@ -1635,13 +1636,32 @@ class ScanWindow(tk.Toplevel):
             used_keys.add(folder_key)
             return folder_key
 
-        for sid, sname, lab, folder_path in students:
-            files = [r[0] for r in self.con.execute(
-                "SELECT file_path FROM files WHERE student_id=? ORDER BY file_path", (sid,)
-            ).fetchall()]
+        folder_groups: dict[str, dict] = {}
 
+        for sid, sname, lab, folder_path in students:
             base_key = (folder_path or "").strip() or f"DB:{sid}"
-            folder_key = _unique_key(base_key)
+            grp = folder_groups.setdefault(base_key, {
+                "files": [],
+                "det_id": "",
+                "det_name": "",
+                "student_id": "",
+                "lab_id": "",
+            })
+            grp["student_id"] = sid or grp.get("student_id", "")
+            grp["det_id"] = sid or grp.get("det_id", "")
+            grp["det_name"] = sname or grp.get("det_name", "")
+            grp["lab_id"] = lab or grp.get("lab_id", "")
+
+        file_rows = self.con.execute("""
+            SELECT
+              file_path,
+              COALESCE(student_id, ''),
+              COALESCE(source_folder, ''),
+              COALESCE(detected_id, ''),
+              COALESCE(detected_name, '')
+            FROM files
+            ORDER BY source_folder, file_path
+        """).fetchall()
 
         for fp, sid, source_folder, det_id, det_name in file_rows:
             sid = (sid or "").strip()
@@ -1654,10 +1674,13 @@ class ScanWindow(tk.Toplevel):
                 "det_id": "",
                 "det_name": "",
                 "student_id": "",
+                "lab_id": "",
             })
             grp["files"].append(fp)
             if sid and not grp["student_id"]:
                 grp["student_id"] = sid
+            if sid and not grp["lab_id"]:
+                grp["lab_id"] = (student_map.get(sid) or {}).get("lab", "")
             if det_id and not grp["det_id"]:
                 grp["det_id"] = det_id
             if det_name and not grp["det_name"]:
@@ -1677,7 +1700,7 @@ class ScanWindow(tk.Toplevel):
             det_name = (grp.get("det_name") or "").strip()
             final_id = sid if student_row else det_id
             final_name = (student_row["name"] if student_row else det_name) or Path(folder_path).name
-            lab = student_row["lab"] if student_row else ""
+            lab = student_row["lab"] if student_row else (grp.get("lab_id") or "")
 
             include_row = bool(files) and has_required_student_fields(final_id, final_name)
             folder_key = _unique_key(folder_path)
@@ -1711,63 +1734,6 @@ class ScanWindow(tk.Toplevel):
                 "final_name": sname or "",
                 "lab_id": lab or "",
                 "files": [],
-            }
-
-        # Add editable groups for files not attached to a known student record.
-        # This keeps "not included yet" data visible in Scan/Edit.
-        orphan_groups: dict[str, dict] = {}
-        orphan_files = self.con.execute("""
-            SELECT
-              file_path,
-              COALESCE(student_id, ''),
-              COALESCE(source_folder, ''),
-              COALESCE(detected_id, ''),
-              COALESCE(detected_name, '')
-            FROM files
-            ORDER BY source_folder, file_path
-        """).fetchall()
-
-        for fp, sid, source_folder, det_id, det_name in orphan_files:
-            sid = (sid or "").strip()
-            if sid and sid in known_students:
-                continue
-
-            group_key = (source_folder or "").strip() or str(Path(fp).parent)
-            if not group_key:
-                group_key = f"UNASSIGNED:{fp}"
-
-            grp = orphan_groups.setdefault(group_key, {
-                "det_id": "",
-                "det_name": "",
-                "files": [],
-            })
-            if det_id and not grp["det_id"]:
-                grp["det_id"] = det_id
-            if sid and not grp["det_id"]:
-                grp["det_id"] = sid
-            if det_name and not grp["det_name"]:
-                grp["det_name"] = det_name
-            grp["files"].append(fp)
-
-        for folder_path, grp in orphan_groups.items():
-            det_id = (grp.get("det_id") or "").strip()
-            det_name = (grp.get("det_name") or "").strip()
-            files = grp.get("files") or []
-            final_name = det_name or Path(folder_path).name
-            include_row = bool(files) and has_required_student_fields(det_id, final_name)
-
-            folder_key = _unique_key(folder_path)
-            self.folder_order.append(folder_key)
-            self.rows[folder_key] = {
-                "include": include_row,
-                "manual_include_override": None,
-                "folder": folder_path,
-                "det_id": det_id,
-                "det_name": det_name,
-                "final_id": det_id,
-                "final_name": final_name,
-                "lab_id": "",
-                "files": files,
             }
 
         for item in self.tree.get_children():
@@ -1857,11 +1823,12 @@ class ScanWindow(tk.Toplevel):
         if not sel:
             return
         folder_key = sel[0]
+        self.selected_folder_key = folder_key
         r = self.rows.get(folder_key)
         if not r:
             return
 
-        self.sel_folder_var.set(r.get("folder", folder_key))
+        self.sel_folder_var.set(folder_key)
         self.include_var.set(bool(r["include"]))
         self._suspend_auto_apply = True
         self.final_id_var.set(r["final_id"])
@@ -1890,7 +1857,7 @@ class ScanWindow(tk.Toplevel):
         self._find_from = "1.0"
 
     def apply_include_toggle(self):
-        folder_key = self.sel_folder_var.get().strip()
+        folder_key = self.selected_folder_key or self.sel_folder_var.get().strip()
         if not folder_key or folder_key not in self.rows:
             return
         row = self.rows[folder_key]
@@ -1910,7 +1877,7 @@ class ScanWindow(tk.Toplevel):
         self._set_scan_status(prefix="Scan info")
 
     def apply_edits(self):
-        folder_key = self.sel_folder_var.get().strip()
+        folder_key = self.selected_folder_key or self.sel_folder_var.get().strip()
         if not folder_key or folder_key not in self.rows:
             return
 
@@ -1964,7 +1931,7 @@ class ScanWindow(tk.Toplevel):
             r["lab_id"] = lab
             self._refresh_tree_row(folder_key)
 
-        current = self.sel_folder_var.get().strip()
+        current = self.selected_folder_key or self.sel_folder_var.get().strip()
         if current and current in self.rows:
             self._suspend_auto_apply = True
             self.lab_id_var.set(self.rows[current].get("lab_id", ""))
@@ -2077,7 +2044,7 @@ class ScanWindow(tk.Toplevel):
             delay = 100
         self.skim_delay_ms_var.set(delay)
 
-        current = self.sel_folder_var.get().strip()
+        current = self.selected_folder_key or self.sel_folder_var.get().strip()
         if current in self._skimmable_folder_keys:
             self._skim_folder_idx = self._skimmable_folder_keys.index(current)
             selected_files = self.files_list.curselection()
