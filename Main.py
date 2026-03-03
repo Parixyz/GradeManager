@@ -41,6 +41,7 @@ import random
 from pathlib import Path
 from datetime import datetime
 import json
+import io
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import tkinter.font as tkfont
@@ -491,7 +492,7 @@ def commit_scan_session(con: sqlite3.Connection, root_folder: str, lab_id: str, 
     )
     con.commit()
 
-def upsert_student(con: sqlite3.Connection, student_id: str, student_name: str, lab_id: str | None, folder_path: str | None):
+def upsert_student(con: sqlite3.Connection, student_id: str, student_name: str, lab_id: str | None, folder_path: str | None, included: bool = True):
     con.execute("""
     INSERT INTO students(student_id, student_name, lab_id, folder_path, included)
     VALUES(?, ?, ?, ?, ?)
@@ -655,6 +656,51 @@ def wipe_rubric(con: sqlite3.Connection):
     con.execute("DELETE FROM student_notes")
     con.execute("DELETE FROM rubric_columns")
     con.execute("DELETE FROM rubric_questions")
+    con.commit()
+
+def load_scheme_rows_into_db(con: sqlite3.Connection, rows: list[dict], source_label: str = ""):
+    required = {"question_id", "question_title", "group", "col_key", "col_text", "col_max", "col_order"}
+    wipe_rubric(con)
+
+    questions = {}
+    parsed_rows = []
+    for r in rows:
+        qid = (r.get("question_id") or "").strip()
+        qtitle = (r.get("question_title") or "").strip()
+        sub_id = (r.get("sub_id") or "").strip()
+        group = (r.get("group") or "").strip()
+        col_key = (r.get("col_key") or "").strip()
+        col_text = (r.get("col_text") or "").strip()
+        if not qid or not col_key or not col_text:
+            continue
+        try:
+            col_max = float(r.get("col_max") or 0)
+        except Exception:
+            col_max = 0.0
+        try:
+            col_order = int(float(r.get("col_order") or 0))
+        except Exception:
+            col_order = 0
+        questions.setdefault(qid, {"title": qtitle or qid, "sub_id": sub_id})
+        parsed_rows.append((qid, col_key, group, col_text, col_max, col_order))
+
+    for qid, qd in questions.items():
+        con.execute(
+            "INSERT OR REPLACE INTO rubric_questions(question_id, question_title, sub_id) VALUES(?,?,?)",
+            (qid, qd["title"], qd.get("sub_id", "")),
+        )
+
+    for qid, col_key, group, col_text, col_max, col_order in parsed_rows:
+        con.execute(
+            """
+            INSERT OR REPLACE INTO rubric_columns(question_id, col_key, col_group, col_text, col_max, col_order)
+            VALUES(?,?,?,?,?,?)
+            """,
+            (qid, col_key, group, col_text, col_max, col_order),
+        )
+
+    if source_label:
+        meta_set(con, "scheme_csv_path", source_label)
     con.commit()
 
 def load_scheme_csv_into_db(con: sqlite3.Connection, csv_path: Path):
@@ -2223,7 +2269,7 @@ class ScanWindow(tk.Toplevel):
         for idx, fp in enumerate(r["files"]):
             self.files_tree.insert("", "end", iid=f"file-{idx}", values=(fp,))
 
-        self.preview.configure(bg="#FFF9C4" if not bool(r.get("include")) else "#FFFDF7")
+        self.preview.configure(font=self.preview_font_normal if bool(r.get("include")) else self.preview_font_bold)
         self.preview.delete("1.0", tk.END)
 
     def on_scan_file_select(self, _evt=None, file_iid: str | None = None):
@@ -2261,7 +2307,7 @@ class ScanWindow(tk.Toplevel):
         row["include"] = bool(self.include_var.get())
         row["manual_include_override"] = row["include"]
         self._refresh_tree_row(folder_key)
-        self.preview.configure(bg="#FFF9C4" if not bool(row.get("include")) else "#FFFDF7")
+        self.preview.configure(font=self.preview_font_normal if bool(row.get("include")) else self.preview_font_bold)
         self._reload_student_rows()
         self._set_scan_status(prefix="Scan info")
 
@@ -2295,7 +2341,7 @@ class ScanWindow(tk.Toplevel):
         self._suspend_auto_apply = False
 
         self._refresh_tree_row(folder_key)
-        self.preview.configure(bg="#FFF9C4" if not bool(row.get("include")) else "#FFFDF7")
+        self.preview.configure(font=self.preview_font_normal if bool(row.get("include")) else self.preview_font_bold)
         self._reload_student_rows()
         self._set_scan_status(prefix="Scan info")
 
@@ -2733,6 +2779,7 @@ class App:
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
 
         ttk.Button(top, text="Load Scheme CSV...", command=self.load_scheme_csv).pack(side=tk.LEFT)
+        ttk.Button(top, text="Open Scheme Generator / Editor", command=self.open_scheme_editor).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Reload Last Scheme", command=self.reload_last_scheme).pack(side=tk.LEFT, padx=6)
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
@@ -2891,6 +2938,7 @@ class App:
         ttk.Button(top, text="Export Grades (all students)", command=self.save_all_excel).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Export PDF (selected)", command=self.export_student_pdf).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Export PDFs (all students)", command=self.export_all_students_pdfs).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Auto Export Pack", command=self.auto_export_pack).pack(side=tk.LEFT, padx=6)
 
         cols = ("student_id", "student_name", "lab_id", "graded_questions", "overall", "overall_curved")
         self.sum_tree = ttk.Treeview(self.tab_summary, columns=cols, show="headings", height=25)
@@ -3161,6 +3209,106 @@ class App:
             return
         self.refresh_question_lists()
         messagebox.showinfo("Reloaded", f"Reloaded:\n{p}")
+
+    def open_scheme_editor(self):
+        if not self.require_grading_db():
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Scheme Generator / Editor")
+        win.geometry("1200x760")
+
+        top = ttk.Frame(win, style="Pastel.TFrame", padding=8)
+        top.pack(fill=tk.X)
+
+        text = tk.Text(win, wrap="none")
+        text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        header = "question_id,question_title,group,col_key,col_text,col_max,col_order,sub_id\n"
+        text.insert("1.0", header)
+
+        def do_new():
+            text.delete("1.0", tk.END)
+            text.insert("1.0", header)
+
+        def do_load():
+            path = filedialog.askopenfilename(title="Load scheme CSV", filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
+            if not path:
+                return
+            try:
+                raw = Path(path).read_text(encoding="utf-8-sig", errors="ignore")
+            except Exception as e:
+                messagebox.showerror("Load failed", str(e))
+                return
+            text.delete("1.0", tk.END)
+            text.insert("1.0", raw)
+
+        def do_save():
+            path = filedialog.asksaveasfilename(title="Save scheme CSV", defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+            if not path:
+                return
+            try:
+                Path(path).write_text(text.get("1.0", tk.END).strip() + "\n", encoding="utf-8")
+            except Exception as e:
+                messagebox.showerror("Save failed", str(e))
+                return
+            messagebox.showinfo("Saved", f"Saved scheme CSV:\n{path}")
+
+        def do_set_current():
+            raw = text.get("1.0", tk.END).strip()
+            if not raw:
+                messagebox.showinfo("Empty", "Enter scheme rows first.")
+                return
+            try:
+                reader = csv.DictReader(io.StringIO(raw))
+                if not reader.fieldnames:
+                    raise ValueError("CSV has no header row.")
+                required = {"question_id", "question_title", "group", "col_key", "col_text", "col_max", "col_order"}
+                missing = required - set([(h or "").strip() for h in reader.fieldnames])
+                if missing:
+                    raise ValueError(f"CSV missing columns: {', '.join(sorted(missing))}")
+                rows = list(reader)
+                load_scheme_rows_into_db(self.grade_con, rows, source_label="(scheme-editor)")
+            except Exception as e:
+                messagebox.showerror("Set current failed", str(e))
+                return
+            self.refresh_question_lists()
+            messagebox.showinfo("Current scheme", "Scheme set as current and loaded.")
+
+        ttk.Button(top, text="New", command=do_new).pack(side=tk.LEFT)
+        ttk.Button(top, text="Load CSV", command=do_load).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Save CSV", command=do_save).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Set as Current Scheme", command=do_set_current).pack(side=tk.LEFT, padx=6)
+
+    def auto_export_pack(self):
+        if not self.require_grading_db():
+            return
+        out_dir = filedialog.askdirectory(title="Choose output folder for auto export pack")
+        if not out_dir:
+            return
+        report_tag = simpledialog.askstring("Report tag", "Enter report tag:", initialvalue="Midterm")
+        if report_tag is None:
+            return
+
+        out_base = Path(out_dir)
+        excel_path = out_base / "All_Grades.xlsx"
+        summary_pdf = out_base / "Summary.pdf"
+        stats_txt = out_base / "Class_Stats.txt"
+        pdf_dir = out_base / "Student_PDFs"
+
+        try:
+            export_all_to_excel(self.sub_con, self.grade_con, excel_path)
+            exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map)
+            exporter.export_summary_pdf(summary_pdf, self.compute_class_stats_text())
+            exporter.export_all_students_pdfs(pdf_dir, report_tag=report_tag)
+            stats_txt.write_text(self.compute_class_stats_text() + "\n", encoding="utf-8")
+        except Exception as e:
+            messagebox.showerror("Auto export failed", str(e))
+            return
+
+        messagebox.showinfo(
+            "Auto export complete",
+            f"Saved:\n- {excel_path}\n- {summary_pdf}\n- {pdf_dir}\n- {stats_txt}",
+        )
 
     def refresh_question_lists(self):
         if self.grade_con is None:
