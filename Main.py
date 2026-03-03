@@ -492,7 +492,7 @@ def merge_student_code(sub_con: sqlite3.Connection, student_id: str) -> str:
                 content = Path(fp).read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 content = ""
-        parts.append(f"\n\n// ===== FILE: {fp} =====\n{content}")
+        parts.append(f"\n\n// ===== FILE: {Path(fp).name} =====\n{content}")
     return "\n".join(parts)
 
 
@@ -868,10 +868,10 @@ def export_all_to_excel(sub_con: sqlite3.Connection, grade_con: sqlite3.Connecti
 
     # Code comment sheet (highlighted ranges + comment text)
     ws_comments = wb.create_sheet(title="Code_Comments")
-    ws_comments.append(["Student ID", "Student Name", "Code (file)", "Highlighted part", "Comment", "Time"])
+    ws_comments.append(["Student ID", "Student Name", "Code (file)", "Highlighted part", "Comment"])
     for sid, sname, _lab in assessed_students:
-        for fp, sidx, eidx, txt, _color, ts in fetch_code_comments_for_student(grade_con, sid):
-            ws_comments.append([sid, sname, Path(fp).name, f"{sidx}–{eidx}", txt or "", ts or ""])
+        for fp, sidx, eidx, txt, _color, _ts in fetch_code_comments_for_student(grade_con, sid):
+            ws_comments.append([sid, sname, Path(fp).name, f"{sidx}–{eidx}", txt or ""])
 
     # Reference model row if FULL exists
     full_row = next((r for r in students if is_full_student(r[0])), None)
@@ -941,7 +941,7 @@ class PDFExporter:
                 by_line.setdefault(line, []).append((cid, sidx, eidx, txt, ts))
 
             lines = code.splitlines()
-            out.append(f"\n\n// ===== FILE: {fp} =====\n")
+            out.append(f"\n\n// ===== FILE: {Path(fp).name} =====\n")
 
             for i, line_text in enumerate(lines, start=1):
                 if i in by_line:
@@ -954,27 +954,24 @@ class PDFExporter:
 
         return "\n".join(out)
 
-    def _build_highlighted_code_blocks(self, sid: str, max_chars_per_block: int = 90000):
+    def _build_highlighted_code_blocks(self, sid: str):
         """
-        Returns list of Preformatted blocks with "line highlights" effect simulated by
-        prefixing lines that have comments. True PDF highlight is not supported by reportlab
-        in the Acrobat-annotation sense, so we simulate with markers and (optionally) background
-        in a separate table view.
+        Returns per-file rows that can be rendered in a PDF table with true background color
+        on highlighted lines.
         """
-        blocks = []
+        blocks: list[tuple[str, list[tuple[str, bool]]]] = []
         files = get_student_files(self.sub_con, sid)
 
-        all_rows = fetch_code_comments_for_student(self.grade_con, sid)
+        rows = fetch_code_comments_for_student(self.grade_con, sid)
         # Map: file -> set(lines_with_comment)
         file_lines = {}
-        for fp, sidx, _eidx, _txt, _color, _ts in all_rows:
+        for fp, sidx, _eidx, _txt, _color, _ts in rows:
             try:
                 line = int(str(sidx).split(".", 1)[0])
             except Exception:
                 line = 1
             file_lines.setdefault(fp, set()).add(line)
 
-        big_text = []
         for fp in files:
             code = get_file_content(self.sub_con, fp)
             if code is None:
@@ -984,17 +981,11 @@ class PDFExporter:
                     code = ""
             lines = code.splitlines()
             marks = file_lines.get(fp, set())
-
-            big_text.append(f"\n\n// ===== FILE: {fp} =====\n")
+            rendered_lines = []
             for i, line in enumerate(lines, start=1):
-                # marker for “highlight”
-                prefix = ">> " if i in marks else "   "
-                big_text.append(f"{prefix}{i:04d} | {line}")
+                rendered_lines.append((f"{i:04d} | {line}", i in marks))
+            blocks.append((Path(fp).name, rendered_lines))
 
-        txt = "\n".join(big_text)
-        # Split into manageable chunks
-        for i in range(0, len(txt), max_chars_per_block):
-            blocks.append(txt[i:i+max_chars_per_block])
         return blocks
 
     def _extract_code_snippet(self, file_path: str, start_index: str, end_index: str, max_chars: int = 420) -> str:
@@ -1125,7 +1116,6 @@ class PDFExporter:
         # Highlighted code + comments table (compact, printable)
         story.append(PageBreak())
         story.append(Paragraph("<b>Highlighted Code Review</b>", styles["Heading2"]))
-        story.append(Paragraph("Lemon = highlighted code, light purple = comment.", styles["Normal"]))
         rows = fetch_code_comments_for_student(self.grade_con, sid)
         if not rows:
             story.append(Paragraph("(No code comments.)", styles["Normal"]))
@@ -1134,8 +1124,8 @@ class PDFExporter:
             cell_style.fontSize = 8
             cell_style.leading = 10
 
-            td = [["File", "Range", "Code (highlighted part)", "Comment", "Time"]]
-            for fp, sidx, eidx, txt, _color, ts in rows:
+            td = [["File", "Range", "Code (highlighted part)", "Comment"]]
+            for fp, sidx, eidx, txt, _color, _ts in rows:
                 snippet = self._extract_code_snippet(fp, sidx, eidx)
                 esc_file = Path(fp).name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 esc_snippet = (snippet or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -1145,10 +1135,9 @@ class PDFExporter:
                     Paragraph(f"{sidx}–{eidx}", cell_style),
                     Paragraph(esc_snippet or "(empty selection)", cell_style),
                     Paragraph(esc_comment[:320], cell_style),
-                    Paragraph((ts or "")[:16], cell_style),
                 ])
 
-            tbl2 = Table(td, colWidths=[70, 80, 170, 170, 66], repeatRows=1)
+            tbl2 = Table(td, colWidths=[85, 90, 200, 181], repeatRows=1)
             tbl2.setStyle(TableStyle([
                 ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE5FF")),
                 ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#FF4FA3")),
@@ -1156,7 +1145,6 @@ class PDFExporter:
                 ("VALIGN", (0,0), (-1,-1), "TOP"),
                 ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
                 ("BACKGROUND", (2,1), (2,-1), colors.HexColor("#FFF9A6")),
-                ("BACKGROUND", (3,1), (3,-1), colors.HexColor("#F3ECFF")),
                 ("FONTSIZE", (0,0), (-1,-1), 8),
                 ("LEFTPADDING", (0,0), (-1,-1), 4),
                 ("RIGHTPADDING", (0,0), (-1,-1), 4),
@@ -1167,10 +1155,30 @@ class PDFExporter:
 
         # Full code listing with highlighted markers
         story.append(PageBreak())
-        story.append(Paragraph("<b>Full Code Listing (Highlighted lines marked with '&gt;&gt;')</b>", styles["Heading2"]))
+        story.append(Paragraph("<b>Full Code Listing</b>", styles["Heading2"]))
         blocks = self._build_highlighted_code_blocks(sid)
-        for bi, btxt in enumerate(blocks):
-            story.append(Preformatted(btxt, styles["Code"]))
+        line_style = styles["Code"].clone("code_line_style")
+        line_style.fontSize = 7
+        line_style.leading = 8
+        for bi, (fname, lines_with_flags) in enumerate(blocks):
+            story.append(Paragraph(f"<b>{fname}</b>", styles["Heading3"]))
+            if not lines_with_flags:
+                story.append(Paragraph("(empty file)", styles["Normal"]))
+            else:
+                table_data = [[Paragraph((line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")) or " ", line_style)] for line, _marked in lines_with_flags]
+                tbl_code = Table(table_data, colWidths=[516], repeatRows=0)
+                style_cmds = [
+                    ("GRID", (0,0), (-1,-1), 0.2, colors.HexColor("#E0E0E0")),
+                    ("LEFTPADDING", (0,0), (-1,-1), 4),
+                    ("RIGHTPADDING", (0,0), (-1,-1), 4),
+                    ("TOPPADDING", (0,0), (-1,-1), 1),
+                    ("BOTTOMPADDING", (0,0), (-1,-1), 1),
+                ]
+                for row_i, (_line, marked) in enumerate(lines_with_flags):
+                    if marked:
+                        style_cmds.append(("BACKGROUND", (0,row_i), (0,row_i), colors.HexColor("#FFF9A6")))
+                tbl_code.setStyle(TableStyle(style_cmds))
+                story.append(tbl_code)
             if bi < len(blocks) - 1:
                 story.append(PageBreak())
 
@@ -1459,7 +1467,6 @@ class ScanWindow(tk.Toplevel):
         # Skimming mode (quick review through files/students)
         self.skim_running = False
         self.skim_delay_ms_var = tk.IntVar(value=300)
-        self.skim_files_one_by_one_var = tk.BooleanVar(value=True)
         self._skim_folder_idx = 0
         self._skim_file_idx = 0
         self._skimmable_folder_keys: list[str] = []
@@ -1511,11 +1518,6 @@ class ScanWindow(tk.Toplevel):
 
         ttk.Label(skim_tab, text="Skim delay (ms)", style="Pastel.TLabel").pack(side=tk.LEFT)
         ttk.Entry(skim_tab, textvariable=self.skim_delay_ms_var, width=7).pack(side=tk.LEFT, padx=(6, 10))
-        ttk.Checkbutton(
-            skim_tab,
-            text="Skim files one-by-one",
-            variable=self.skim_files_one_by_one_var,
-        ).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(skim_tab, text="Start Skimming (from selected)", command=self.start_skimming).pack(side=tk.LEFT)
         ttk.Button(skim_tab, text="Stop Skimming", command=self.stop_skimming).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(skim_tab, text="Stop keys: Q / Esc", style="Pastel.TLabel").pack(side=tk.LEFT, padx=(12, 0))
@@ -2265,14 +2267,10 @@ class ScanWindow(tk.Toplevel):
 
     def _build_skim_steps(self):
         steps: list[tuple[str, int | None]] = []
-        by_files = bool(self.skim_files_one_by_one_var.get())
         for folder_key in self._skimmable_folder_keys:
             files = self.rows.get(folder_key, {}).get("files") or []
-            if by_files:
-                for idx in range(len(files)):
-                    steps.append((folder_key, idx))
-            else:
-                steps.append((folder_key, 0 if files else None))
+            for idx in range(len(files)):
+                steps.append((folder_key, idx))
         return steps
 
     def _select_file_in_current_folder(self, file_idx: int) -> bool:
