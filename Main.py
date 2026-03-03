@@ -1333,6 +1333,7 @@ class ScanWindow(tk.Toplevel):
         self._skimmable_folder_keys: list[str] = []
 
         self._build()
+        self.load_existing_rows_from_db()
 
     def _build(self):
         top = ttk.Frame(self, padding=10, style="Pastel.TFrame")
@@ -1604,6 +1605,64 @@ class ScanWindow(tk.Toplevel):
         self.folder_name_regex_var.set((payload.get("folder_name_regex") or "").strip())
         self.only_new_files_var.set(bool(payload.get("only_new_files", False)))
         messagebox.showinfo("Loaded", f"Regex copy loaded:\n{path}")
+
+    def load_existing_rows_from_db(self):
+        """
+        Populate Scan/Edit with current submissions DB rows.
+        """
+        self.rows.clear()
+        self.folder_order.clear()
+
+        students = self.con.execute("""
+            SELECT student_id, student_name, COALESCE(lab_id,''), COALESCE(folder_path,'')
+            FROM students
+            ORDER BY student_id
+        """).fetchall()
+
+        used_keys = set()
+        for sid, sname, lab, folder_path in students:
+            files = [r[0] for r in self.con.execute(
+                "SELECT file_path FROM files WHERE student_id=? ORDER BY file_path", (sid,)
+            ).fetchall()]
+
+            base_key = (folder_path or "").strip() or f"DB:{sid}"
+            folder_key = base_key
+            n = 2
+            while folder_key in used_keys:
+                folder_key = f"{base_key}#{n}"
+                n += 1
+            used_keys.add(folder_key)
+
+            include_row = bool(files) and has_required_student_fields(sid, sname)
+            self.folder_order.append(folder_key)
+            self.rows[folder_key] = {
+                "include": include_row,
+                "folder": folder_key,
+                "det_id": sid or "",
+                "det_name": sname or "",
+                "final_id": sid or "",
+                "final_name": sname or "",
+                "lab_id": lab or "",
+                "files": files,
+            }
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        for folder_key in self.folder_order:
+            r = self.rows[folder_key]
+            self.tree.insert("", "end", iid=folder_key, values=(
+                "YES" if r["include"] else "NO",
+                Path(r["folder"]).name,
+                r["det_id"],
+                r["det_name"],
+                r["final_id"],
+                r["final_name"],
+                r.get("lab_id", ""),
+                str(len(r["files"]))
+            ))
+
+        self._set_scan_status(prefix="Loaded from DB")
 
     def scan(self):
         if not self.root_folder:
@@ -2056,6 +2115,12 @@ class App:
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
 
+        ttk.Button(top, text="New Submissions DB...", command=self.new_submissions_db).pack(side=tk.LEFT)
+        ttk.Button(top, text="Open Submissions DB...", command=self.open_submissions_db).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Save Submissions DB As...", command=self.save_submissions_db_as).pack(side=tk.LEFT, padx=6)
+
+        ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
+
         ttk.Button(top, text="New Grading DB...", command=self.new_grading_db).pack(side=tk.LEFT)
         ttk.Button(top, text="Open Grading DB...", command=self.open_grading_db).pack(side=tk.LEFT, padx=6)
 
@@ -2065,6 +2130,9 @@ class App:
         ttk.Button(top, text="Reload Last Scheme", command=self.reload_last_scheme).pack(side=tk.LEFT, padx=6)
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
+
+        self.sub_db_status_lbl = ttk.Label(top, text=f"Submissions DB: {self.sub_db_path.name}", style="Pastel.TLabel")
+        self.sub_db_status_lbl.pack(side=tk.LEFT, padx=10)
 
         self.db_status_lbl = ttk.Label(top, text="Grading DB: (none)", style="Pastel.TLabel")
         self.db_status_lbl.pack(side=tk.LEFT, padx=10)
@@ -2257,6 +2325,67 @@ class App:
     # ---- scan window ----
     def open_scan_window(self):
         return ScanWindow(self)
+
+    # ---- submissions DB open/create/save ----
+    def new_submissions_db(self):
+        path = filedialog.asksaveasfilename(
+            title="Create submissions DB",
+            defaultextension=".sqlite",
+            filetypes=[("SQLite DB", "*.sqlite"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        self._open_submissions_db(Path(path))
+
+    def open_submissions_db(self):
+        path = filedialog.askopenfilename(
+            title="Open submissions DB",
+            filetypes=[("SQLite DB", "*.sqlite"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        self._open_submissions_db(Path(path))
+
+    def save_submissions_db_as(self):
+        path = filedialog.asksaveasfilename(
+            title="Save submissions DB as",
+            defaultextension=".sqlite",
+            filetypes=[("SQLite DB", "*.sqlite"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+
+        target = Path(path)
+        try:
+            out_con = db_connect(target)
+            self.sub_con.backup(out_con)
+            out_con.close()
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+            return
+
+        self._open_submissions_db(target)
+        messagebox.showinfo("Saved", f"Submissions DB saved to:\n{target}")
+
+    def _open_submissions_db(self, path: Path):
+        if self.sub_con is not None:
+            try:
+                self.sub_con.close()
+            except Exception:
+                pass
+
+        self.sub_db_path = path
+        self.sub_con = db_connect(path)
+        submissions_db_init(self.sub_con)
+        self.sub_db_status_lbl.config(text=f"Submissions DB: {path.name}")
+
+        self.selected_student_id = None
+        self.selected_file_path = None
+        self.refresh_students(keep_selected=False)
+        self.refresh_summary()
+        self.preview.delete("1.0", tk.END)
+        self.file_list.delete(0, tk.END)
+        self.comment_list.delete(0, tk.END)
 
     # ---- grading DB open/create ----
     def new_grading_db(self):
