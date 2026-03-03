@@ -1608,8 +1608,9 @@ class ScanWindow(tk.Toplevel):
 
     def load_existing_rows_from_db(self):
         """
-        Populate Scan/Edit with DB rows by folder first (not just student rows),
-        then add any remaining students with no files.
+        Populate Scan/Edit with current submissions DB rows.
+        Includes both saved students and any file groups that are not currently
+        attached to a valid student record so they can be edited/included later.
         """
         self.rows.clear()
         self.folder_order.clear()
@@ -1623,6 +1624,7 @@ class ScanWindow(tk.Toplevel):
                        for sid, sname, lab, folder_path in students}
 
         used_keys = set()
+        known_students = {sid for sid, *_rest in students}
 
         def _unique_key(base_key: str) -> str:
             folder_key = base_key
@@ -1633,17 +1635,13 @@ class ScanWindow(tk.Toplevel):
             used_keys.add(folder_key)
             return folder_key
 
-        folder_groups: dict[str, dict] = {}
-        file_rows = self.con.execute("""
-            SELECT
-              file_path,
-              COALESCE(student_id, ''),
-              COALESCE(source_folder, ''),
-              COALESCE(detected_id, ''),
-              COALESCE(detected_name, '')
-            FROM files
-            ORDER BY source_folder, file_path
-        """).fetchall()
+        for sid, sname, lab, folder_path in students:
+            files = [r[0] for r in self.con.execute(
+                "SELECT file_path FROM files WHERE student_id=? ORDER BY file_path", (sid,)
+            ).fetchall()]
+
+            base_key = (folder_path or "").strip() or f"DB:{sid}"
+            folder_key = _unique_key(base_key)
 
         for fp, sid, source_folder, det_id, det_name in file_rows:
             sid = (sid or "").strip()
@@ -1713,6 +1711,63 @@ class ScanWindow(tk.Toplevel):
                 "final_name": sname or "",
                 "lab_id": lab or "",
                 "files": [],
+            }
+
+        # Add editable groups for files not attached to a known student record.
+        # This keeps "not included yet" data visible in Scan/Edit.
+        orphan_groups: dict[str, dict] = {}
+        orphan_files = self.con.execute("""
+            SELECT
+              file_path,
+              COALESCE(student_id, ''),
+              COALESCE(source_folder, ''),
+              COALESCE(detected_id, ''),
+              COALESCE(detected_name, '')
+            FROM files
+            ORDER BY source_folder, file_path
+        """).fetchall()
+
+        for fp, sid, source_folder, det_id, det_name in orphan_files:
+            sid = (sid or "").strip()
+            if sid and sid in known_students:
+                continue
+
+            group_key = (source_folder or "").strip() or str(Path(fp).parent)
+            if not group_key:
+                group_key = f"UNASSIGNED:{fp}"
+
+            grp = orphan_groups.setdefault(group_key, {
+                "det_id": "",
+                "det_name": "",
+                "files": [],
+            })
+            if det_id and not grp["det_id"]:
+                grp["det_id"] = det_id
+            if sid and not grp["det_id"]:
+                grp["det_id"] = sid
+            if det_name and not grp["det_name"]:
+                grp["det_name"] = det_name
+            grp["files"].append(fp)
+
+        for folder_path, grp in orphan_groups.items():
+            det_id = (grp.get("det_id") or "").strip()
+            det_name = (grp.get("det_name") or "").strip()
+            files = grp.get("files") or []
+            final_name = det_name or Path(folder_path).name
+            include_row = bool(files) and has_required_student_fields(det_id, final_name)
+
+            folder_key = _unique_key(folder_path)
+            self.folder_order.append(folder_key)
+            self.rows[folder_key] = {
+                "include": include_row,
+                "manual_include_override": None,
+                "folder": folder_path,
+                "det_id": det_id,
+                "det_name": det_name,
+                "final_id": det_id,
+                "final_name": final_name,
+                "lab_id": "",
+                "files": files,
             }
 
         for item in self.tree.get_children():
@@ -1998,9 +2053,7 @@ class ScanWindow(tk.Toplevel):
         self.files_list.selection_set(file_idx)
         self.files_list.activate(file_idx)
         self.files_list.see(file_idx)
-        self.files_list.focus_set()
         self.files_list.event_generate("<<ListboxSelect>>")
-        self.update_idletasks()
         self.on_file_select()
         return True
 
