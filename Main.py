@@ -36,6 +36,8 @@ import os
 import re
 import sqlite3
 import hashlib
+import math
+import random
 from pathlib import Path
 from datetime import datetime
 import json
@@ -76,7 +78,7 @@ SUBMISSIONS_DB = "submissions.sqlite"
 DEFAULT_THEME = "Grade strictly. If unclear, give 0 and explain why."
 
 # Per your request: keep model/AI plumbing separate; leave default empty/off.
-DEFAULT_AI_ENABLED = False
+DEFAULT_AI_ENABLED = True
 
 ID_DIGITS_RE = re.compile(r"\b\d{5,12}\b")
 
@@ -284,6 +286,39 @@ def infer_student_for_folder(
     return final_id, final_name, (detected_id or ""), (detected_name or ""), [str(p) for p in files]
 
 
+class FolderScannerBase:
+    """
+    Base scanner so folder scanning can be customized via inheritance later.
+    """
+    def __init__(self, root_folder: Path, file_globs: list[str], include_filename_regex: str,
+                 folder_id_regex: str, folder_name_regex: str):
+        self.root_folder = root_folder
+        self.file_globs = file_globs or ["*.java"]
+        self.include_filename_regex = include_filename_regex
+        self.folder_id_regex = folder_id_regex
+        self.folder_name_regex = folder_name_regex
+
+    def collect_folders(self) -> list[Path]:
+        folders = [p for p in self.root_folder.iterdir() if p.is_dir()]
+        root_has_any = any(any(self.root_folder.glob(g)) for g in self.file_globs)
+        if root_has_any:
+            folders = [self.root_folder] + folders
+        return folders
+
+    def detect_folder(self, folder: Path):
+        return infer_student_for_folder(
+            folder,
+            file_globs=self.file_globs,
+            include_filename_regex=self.include_filename_regex,
+            folder_id_regex=self.folder_id_regex,
+            folder_name_regex=self.folder_name_regex,
+        )
+
+
+class DefaultFolderScanner(FolderScannerBase):
+    pass
+
+
 # =============================================================================
 # 3) Submissions DB
 # =============================================================================
@@ -403,7 +438,8 @@ def grading_db_init(con: sqlite3.Connection):
 
     CREATE TABLE IF NOT EXISTS rubric_questions(
       question_id TEXT PRIMARY KEY,
-      question_title TEXT
+      question_title TEXT,
+      sub_id TEXT
     );
 
     CREATE TABLE IF NOT EXISTS rubric_columns(
@@ -454,6 +490,12 @@ def grading_db_init(con: sqlite3.Connection):
       created_at TEXT
     );
     """)
+    try:
+        cols = [r[1] for r in con.execute("PRAGMA table_info(rubric_questions)").fetchall()]
+        if "sub_id" not in cols:
+            con.execute("ALTER TABLE rubric_questions ADD COLUMN sub_id TEXT;")
+    except Exception:
+        pass
     con.commit()
 
 def meta_set(con: sqlite3.Connection, key: str, value: str):
@@ -487,11 +529,14 @@ def load_scheme_csv_into_db(con: sqlite3.Connection, csv_path: Path):
 
         wipe_rubric(con)
 
+        has_sub_id = any((h or "").strip() == "sub_id" for h in reader.fieldnames)
+
         questions = {}
         rows = []
         for r in reader:
             qid = (r.get("question_id") or "").strip()
             qtitle = (r.get("question_title") or "").strip()
+            sub_id = (r.get("sub_id") or "").strip() if has_sub_id else ""
             group = (r.get("group") or "").strip()
             col_key = (r.get("col_key") or "").strip()
             col_text = (r.get("col_text") or "").strip()
@@ -509,14 +554,15 @@ def load_scheme_csv_into_db(con: sqlite3.Connection, csv_path: Path):
             except Exception:
                 col_order = 0
 
-            questions[qid] = qtitle or qid
+            questions[qid] = (qtitle or qid, sub_id)
             rows.append((qid, col_key, group, col_text, col_max, col_order))
 
-        for qid, title in questions.items():
+        for qid, payload in questions.items():
+            title, sub_id = payload
             con.execute("""
-              INSERT OR REPLACE INTO rubric_questions(question_id, question_title)
-              VALUES(?, ?)
-            """, (qid, title))
+              INSERT OR REPLACE INTO rubric_questions(question_id, question_title, sub_id)
+              VALUES(?, ?, ?)
+            """, (qid, title, sub_id))
 
         for qid, col_key, group, col_text, col_max, col_order in rows:
             con.execute("""
@@ -529,7 +575,7 @@ def load_scheme_csv_into_db(con: sqlite3.Connection, csv_path: Path):
 
 def fetch_questions(con: sqlite3.Connection):
     return con.execute("""
-      SELECT question_id, question_title
+      SELECT question_id, question_title, COALESCE(sub_id, '')
       FROM rubric_questions
       ORDER BY question_id
     """).fetchall()
@@ -575,6 +621,13 @@ def compute_total(con: sqlite3.Connection, student_id: str, question_id: str | N
     """, (student_id, question_id)).fetchone()
     return float(row[0] if row else 0.0)
 
+def compute_overall_total(con: sqlite3.Connection, student_id: str) -> float:
+    row = con.execute("""
+      SELECT COALESCE(SUM(COALESCE(points,0)),0)
+      FROM rubric_scores
+      WHERE student_id=?
+    """, (student_id,)).fetchone()
+    return float(row[0] if row else 0.0)
 def upsert_student_note(con: sqlite3.Connection, student_id: str, question_id: str, rationale: str, overall_grade: float | None):
     con.execute("""
       INSERT INTO student_notes(student_id, question_id, rationale, overall_grade, updated_at)
@@ -691,8 +744,7 @@ def export_all_to_excel(sub_con: sqlite3.Connection, grade_con: sqlite3.Connecti
 
     ws_sum.append([
         "Student ID", "Student Name", "LabID",
-        "Assessed Q1", "Assessed Q2",
-        "Q1 raw", "Q2 raw", "Overall raw"
+        "Questions graded", "Overall raw"
     ])
 
     students = sub_con.execute("""
@@ -702,10 +754,9 @@ def export_all_to_excel(sub_con: sqlite3.Connection, grade_con: sqlite3.Connecti
     """).fetchall()
 
     for sid, sname, lab in students:
-        q1, q2 = load_student_assignment(grade_con, sid)
-        q1_raw = compute_total(grade_con, sid, q1)
-        q2_raw = compute_total(grade_con, sid, q2)
-        ws_sum.append([sid, sname, lab, q1 or "", q2 or "", q1_raw, q2_raw, (q1_raw + q2_raw)])
+        graded_count = grade_con.execute("SELECT COUNT(DISTINCT question_id) FROM rubric_scores WHERE student_id=?", (sid,)).fetchone()[0]
+        overall = compute_overall_total(grade_con, sid)
+        ws_sum.append([sid, sname, lab, graded_count, overall])
 
     # Per-question sheets
     for qid in question_ids:
@@ -860,8 +911,6 @@ class PDFExporter:
         sname = srow[0] if srow else ""
         lab = srow[1] if srow else ""
 
-        q1, q2 = load_student_assignment(self.grade_con, sid)
-
         styles = getSampleStyleSheet()
         doc = SimpleDocTemplate(str(out_path), pagesize=letter, title=f"{sid} grading report")
 
@@ -870,15 +919,16 @@ class PDFExporter:
         story.append(Paragraph(f"<b>Student:</b> {sid} — {sname}", styles["Normal"]))
         if lab:
             story.append(Paragraph(f"<b>LabID:</b> {lab}", styles["Normal"]))
-        story.append(Paragraph(f"<b>Assessed:</b> {q1 or '-'} and {q2 or '-'}", styles["Normal"]))
+        overall = compute_overall_total(self.grade_con, sid)
+        story.append(Paragraph(f"<b>Overall total:</b> {overall:g}", styles["Normal"]))
         story.append(Spacer(1, 12))
 
         # Per-question tables
-        for qid in [q1, q2]:
-            if not qid:
-                continue
+        for qid in fetch_all_question_ids(self.grade_con):
             qtitle = self.question_map.get(qid, qid)
             total = compute_total(self.grade_con, sid, qid)
+            if total <= 0 and not fetch_columns_for_question(self.grade_con, qid):
+                continue
             story.append(Paragraph(f"<b>{qid}</b> — {qtitle} (Total: {total:g})", styles["Heading2"]))
 
             cols = fetch_columns_for_question(self.grade_con, qid)
@@ -965,14 +1015,13 @@ class PDFExporter:
             return (0 if sid.lower() == "full" else 1, sid)
         students = sorted(students, key=key)
 
-        td = [["Student ID", "Name", "LabID", "Q1", "Q1 total", "Q2", "Q2 total", "Overall"]]
+        td = [["Student ID", "Name", "LabID", "Questions graded", "Overall"]]
         for sid, sname, lab in students:
-            q1, q2 = load_student_assignment(self.grade_con, sid)
-            q1t = compute_total(self.grade_con, sid, q1)
-            q2t = compute_total(self.grade_con, sid, q2)
-            td.append([sid, sname, lab, q1 or "", f"{q1t:g}", q2 or "", f"{q2t:g}", f"{(q1t+q2t):g}"])
+            graded_count = self.grade_con.execute("SELECT COUNT(DISTINCT question_id) FROM rubric_scores WHERE student_id=?", (sid,)).fetchone()[0]
+            overall = compute_overall_total(self.grade_con, sid)
+            td.append([sid, sname, lab, str(graded_count), f"{overall:g}"])
 
-        tbl = Table(td, colWidths=[70, 130, 45, 45, 55, 45, 55, 55])
+        tbl = Table(td, colWidths=[90, 170, 80, 110, 80])
         tbl.setStyle(TableStyle([
             ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE7FF")),
             ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
@@ -1027,8 +1076,25 @@ class AutoGrader:
         """
         if not self.enabled:
             raise RuntimeError("AutoGrader is disabled (optional component).")
-        # Placeholder: implement later
-        return {"scores": [], "rationale": ""}
+
+        scores = []
+        for item in (rubric_items or []):
+            col_key = item.get("col_key")
+            if not col_key:
+                continue
+            max_points = float(item.get("max_points", 0.0) or 0.0)
+            pts = random.uniform(0.0, max_points) if max_points > 0 else 0.0
+            pts = round(pts, 2)
+            scores.append({
+                "col_key": col_key,
+                "points": pts,
+                "note": "Auto draft (random in range).",
+            })
+
+        return {
+            "scores": scores,
+            "rationale": "Auto-generated draft scores (randomized within each rubric max). Please review.",
+        }
 
 
 # =============================================================================
@@ -1213,6 +1279,7 @@ class ScanWindow(tk.Toplevel):
         ttk.Entry(top, textvariable=self.folder_id_regex_var, width=18).pack(side=tk.LEFT, padx=(6, 10))
         ttk.Label(top, text="Folder Name regex (cap group)", style="Pastel.TLabel").pack(side=tk.LEFT)
         ttk.Entry(top, textvariable=self.folder_name_regex_var, width=22).pack(side=tk.LEFT, padx=(6, 10))
+        ttk.Button(top, text="Reset Regex", command=self.reset_regex_defaults).pack(side=tk.LEFT, padx=(0, 8))
 
         ttk.Button(top, text="Commit Scan (Save to DB)", command=self.commit).pack(side=tk.RIGHT)
 
@@ -1311,6 +1378,12 @@ class ScanWindow(tk.Toplevel):
         parts = [p.strip() for p in raw.split(",") if p.strip()]
         return parts if parts else ["*.java"]
 
+    def reset_regex_defaults(self):
+        self.file_globs_var.set("*.java")
+        self.filename_regex_var.set("")
+        self.folder_id_regex_var.set(r"(\d{5,12})")
+        self.folder_name_regex_var.set(r"([A-Za-z]+(?:\s+[A-Za-z]+)+)")
+
     def scan(self):
         if not self.root_folder:
             messagebox.showinfo("Pick folder", "Choose ROOT folder first.")
@@ -1321,41 +1394,39 @@ class ScanWindow(tk.Toplevel):
         folder_id_regex = (self.folder_id_regex_var.get() or "").strip()
         folder_name_regex = (self.folder_name_regex_var.get() or "").strip()
 
-        folders = [p for p in self.root_folder.iterdir() if p.is_dir()]
-        # If root itself contains matching files, include it as a “folder”
-        root_has_any = False
-        for g in file_globs:
-            if any(self.root_folder.glob(g)):
-                root_has_any = True
-                break
-        if root_has_any:
-            folders = [self.root_folder] + folders
+        scanner = DefaultFolderScanner(
+            self.root_folder,
+            file_globs=file_globs,
+            include_filename_regex=filename_regex,
+            folder_id_regex=folder_id_regex,
+            folder_name_regex=folder_name_regex,
+        )
+        folders = scanner.collect_folders()
 
         self.rows.clear()
         self.folder_order.clear()
 
         total_files = 0
+        blank_folders = 0
+        detected_students = 0
         for sub in folders:
-            final_id, final_name, det_id, det_name, files = infer_student_for_folder(
-                sub,
-                file_globs=file_globs,
-                include_filename_regex=filename_regex,
-                folder_id_regex=folder_id_regex,
-                folder_name_regex=folder_name_regex,
-            )
+            final_id, final_name, det_id, det_name, files = scanner.detect_folder(sub)
             if not files:
-                continue
+                blank_folders += 1
 
             total_files += len(files)
             folder_key = str(sub)
             self.folder_order.append(folder_key)
+            include_row = bool(files)
+            if final_id and final_name:
+                detected_students += 1
             self.rows[folder_key] = {
-                "include": True,
+                "include": include_row,
                 "folder": folder_key,
                 "det_id": det_id or "",
                 "det_name": det_name or "",
                 "final_id": final_id or "",
-                "final_name": final_name or "",
+                "final_name": final_name or (Path(sub).name if not files else ""),
                 "lab_id": "",
                 "files": files,
             }
@@ -1376,7 +1447,7 @@ class ScanWindow(tk.Toplevel):
                 str(len(r["files"]))
             ))
 
-        self.status_lbl.config(text=f"Scan done. Folders: {len(self.folder_order)} | Files: {total_files}")
+        self.status_lbl.config(text=f"Scan done. Folders: {len(self.folder_order)} | Files: {total_files} | Detected students: {detected_students} | Blank folders: {blank_folders}")
 
     def on_folder_select(self, _evt=None):
         sel = self.tree.selection()
@@ -1414,6 +1485,11 @@ class ScanWindow(tk.Toplevel):
     def apply_include_toggle(self):
         folder_key = self.sel_folder_var.get().strip()
         if not folder_key or folder_key not in self.rows:
+            return
+        if not self.rows[folder_key].get("files"):
+            self.rows[folder_key]["include"] = False
+            self.include_var.set(False)
+            self._refresh_tree_row(folder_key)
             return
         self.rows[folder_key]["include"] = bool(self.include_var.get())
         self._refresh_tree_row(folder_key)
@@ -1471,6 +1547,9 @@ class ScanWindow(tk.Toplevel):
         for folder_key in self.folder_order:
             r = self.rows[folder_key]
             if not r["include"]:
+                skipped_folders += 1
+                continue
+            if not r.get("files"):
                 skipped_folders += 1
                 continue
 
@@ -1683,30 +1762,13 @@ class App:
         right.columnconfigure(0, weight=1)
         right.rowconfigure(14, weight=1)
 
-        ttk.Label(right, text="Assessed Questions (exactly two)", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
-        assign = ttk.Frame(right, style="PastelCard.TFrame")
-        assign.grid(row=1, column=0, sticky="ew", pady=(4, 8))
-        assign.columnconfigure(1, weight=1)
-
-        ttk.Label(assign, text="Q1", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
-        self.assess_q1_var = tk.StringVar(value="")
-        self.assess_q1_combo = ttk.Combobox(assign, textvariable=self.assess_q1_var, state="readonly")
-        self.assess_q1_combo.grid(row=0, column=1, sticky="ew", padx=(6, 0))
-
-        ttk.Label(assign, text="Q2", style="PastelCard.TLabel").grid(row=1, column=0, sticky="w", pady=(6,0))
-        self.assess_q2_var = tk.StringVar(value="")
-        self.assess_q2_combo = ttk.Combobox(assign, textvariable=self.assess_q2_var, state="readonly")
-        self.assess_q2_combo.grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=(6,0))
-
-        ttk.Button(assign, text="Save assessed Qs for student", command=self.save_student_assessed_questions).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8,0))
-
-        ttk.Separator(right, orient="horizontal").grid(row=2, column=0, sticky="ew", pady=(10,10))
-
-        ttk.Label(right, text="Question (viewer/grading)", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, sticky="w")
+        ttk.Label(right, text="Question (from loaded scheme)", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
         self.question_var = tk.StringVar(value="")
         self.question_combo = ttk.Combobox(right, textvariable=self.question_var, state="readonly")
-        self.question_combo.grid(row=4, column=0, sticky="ew")
+        self.question_combo.grid(row=1, column=0, sticky="ew", pady=(4,8))
         self.question_combo.bind("<<ComboboxSelected>>", self.on_question_select)
+
+        ttk.Separator(right, orient="horizontal").grid(row=2, column=0, sticky="ew", pady=(8,10))
 
         ttk.Label(right, text="Theme / Instructions (saved in DB)", style="PastelCard.TLabel").grid(row=5, column=0, sticky="w", pady=(10, 0))
         self.theme_text = tk.Text(right, height=4,
@@ -1752,11 +1814,10 @@ class App:
         ttk.Button(top, text="Export PDF (summary)", command=self.export_summary_pdf).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Export PDFs (ALL students)", command=self.export_all_students_pdfs).pack(side=tk.LEFT, padx=6)
 
-        cols = ("student_id", "student_name", "lab_id", "q1", "q1_total", "q2", "q2_total", "overall", "overall_curved")
+        cols = ("student_id", "student_name", "lab_id", "graded_questions", "overall", "overall_curved")
         self.sum_tree = ttk.Treeview(self.tab_summary, columns=cols, show="headings", height=25)
         for c, w in [("student_id", 140), ("student_name", 220), ("lab_id", 80),
-                     ("q1", 80), ("q1_total", 90), ("q2", 80), ("q2_total", 90),
-                     ("overall", 90), ("overall_curved", 120)]:
+                     ("graded_questions", 130), ("overall", 90), ("overall_curved", 120)]:
             self.sum_tree.heading(c, text=c)
             self.sum_tree.column(c, width=w, anchor="w")
         self.sum_tree.pack(fill=tk.BOTH, expand=True, pady=(10,0))
@@ -1873,11 +1934,7 @@ class App:
         if self.grade_con is None:
             return
         qs = fetch_questions(self.grade_con)
-        self.question_map = {qid: title for qid, title in qs}
-        items = [f"{qid} — {title}" for qid, title in qs]
-
-        self.assess_q1_combo["values"] = items
-        self.assess_q2_combo["values"] = items
+        self.question_map = {qid: (f"{title} [{sub_id}]" if sub_id else title) for qid, title, sub_id in qs}
         self.refresh_question_picker_for_student()
 
     def refresh_question_picker_for_student(self):
@@ -1885,18 +1942,6 @@ class App:
             return
 
         allowed = list(self.question_map.keys())
-
-        if self.selected_student_id:
-            q1, q2 = load_student_assignment(self.grade_con, self.selected_student_id)
-            if not (q1 and q2):
-                merged = merge_student_code(self.sub_con, self.selected_student_id)
-                guess = detect_assigned_questions(merged)
-                q1 = guess[0] if len(guess) > 0 else None
-                q2 = guess[1] if len(guess) > 1 else None
-                upsert_student_assignment(self.grade_con, self.selected_student_id, q1, q2)
-            allowed = [x for x in [q1, q2] if x]
-            self._set_assignment_ui(q1, q2)
-
         items = [f"{qid} — {self.question_map[qid]}" for qid in allowed if qid in self.question_map]
         self.question_combo["values"] = items
 
@@ -1905,50 +1950,13 @@ class App:
             self.question_var.set("")
             return
 
-        if not self.selected_question_id or self.selected_question_id not in allowed:
+        if not self.selected_question_id or self.selected_question_id not in self.question_map:
             self.selected_question_id = items[0].split(" — ", 1)[0].strip()
             self.question_var.set(items[0])
             try:
                 self.question_combo.current(0)
             except Exception:
                 pass
-
-    def _set_assignment_ui(self, q1: str | None, q2: str | None):
-        def label(qid: str | None) -> str:
-            if not qid:
-                return ""
-            t = self.question_map.get(qid, qid)
-            return f"{qid} — {t}"
-        self.assess_q1_var.set(label(q1))
-        self.assess_q2_var.set(label(q2))
-
-    def save_student_assessed_questions(self):
-        if not self.require_grading_db():
-            return
-        if not self.selected_student_id:
-            messagebox.showinfo("Select student", "Select a student first.")
-            return
-
-        def parse_qid(s: str) -> str | None:
-            s = (s or "").strip()
-            if " — " in s:
-                return s.split(" — ", 1)[0].strip()
-            return s or None
-
-        q1 = parse_qid(self.assess_q1_var.get())
-        q2 = parse_qid(self.assess_q2_var.get())
-        if not q1 or not q2:
-            messagebox.showerror("Missing", "Pick BOTH Q1 and Q2.")
-            return
-        if q1 == q2:
-            messagebox.showerror("Invalid", "Q1 and Q2 must be different.")
-            return
-
-        upsert_student_assignment(self.grade_con, self.selected_student_id, q1, q2)
-        self.refresh_question_picker_for_student()
-        self.load_student_question_view()
-        self.refresh_summary()
-        messagebox.showinfo("Saved", f"Assessed questions saved for {self.selected_student_id}: {q1}, {q2}")
 
     def on_question_select(self, _evt=None):
         v = self.question_var.get().strip()
@@ -2230,20 +2238,9 @@ class App:
             return
 
         # Here: intentionally does NOT call any external/AI.
-        # It ensures each student has assigned Qs; useful as a “prep/test pass”.
-        jobs = 0
-        for sid in students:
-            q1, q2 = load_student_assignment(self.grade_con, sid)
-            if not (q1 and q2):
-                merged = merge_student_code(self.sub_con, sid)
-                guess = detect_assigned_questions(merged)
-                q1 = guess[0] if len(guess) > 0 else None
-                q2 = guess[1] if len(guess) > 1 else None
-                upsert_student_assignment(self.grade_con, sid, q1, q2)
-                jobs += 1
-
+        # Placeholder pass that can be extended for validation checks.
         self.refresh_summary()
-        messagebox.showinfo("Done", f"Autofill/Test updated assignments for {jobs} students (where missing).")
+        messagebox.showinfo("Done", f"Checked {len(students)} students. Scheme-driven grading is active.")
 
     # ---- Export Excel (all) ----
     def save_all_excel(self):
@@ -2272,8 +2269,7 @@ class App:
         """).fetchall()
         vals = []
         for (sid,) in rows:
-            q1, q2 = load_student_assignment(self.grade_con, sid)
-            vals.append(compute_total(self.grade_con, sid, q1) + compute_total(self.grade_con, sid, q2))
+            vals.append(compute_overall_total(self.grade_con, sid))
         return vals
 
     def compute_class_stats_text(self):
@@ -2283,9 +2279,12 @@ class App:
         avg = sum(vals) / len(vals)
         mn = min(vals)
         mx = max(vals)
+        med = sorted(vals)[len(vals)//2]
+        variance = sum((v - avg) ** 2 for v in vals) / len(vals)
+        std = math.sqrt(variance)
         target_avg = 75.0
         curve_factor = (target_avg / avg) if avg > 0 else 1.0
-        return f"Class Stats: avg {avg:.2f} | min {mn:.2f} | max {mx:.2f} | suggested curve× {curve_factor:.3f}"
+        return f"Class Stats: avg {avg:.2f} | median {med:.2f} | std {std:.2f} | min {mn:.2f} | max {mx:.2f} | suggested curve× {curve_factor:.3f}"
 
     def refresh_histogram(self):
         if self.hist_canvas is None or self.hist_ax is None:
@@ -2303,6 +2302,10 @@ class App:
         # No explicit colors (per your preference earlier for charts); matplotlib defaults
         self.hist_ax.hist(vals, bins=12, alpha=0.6, label="raw")
         self.hist_ax.hist(curved, bins=12, alpha=0.6, label=f"curved×{k:.2f}")
+        mean_val = sum(vals) / len(vals)
+        med_val = sorted(vals)[len(vals)//2]
+        self.hist_ax.axvline(mean_val, linestyle="--", linewidth=1.5, label=f"mean {mean_val:.2f}")
+        self.hist_ax.axvline(med_val, linestyle=":", linewidth=1.5, label=f"median {med_val:.2f}")
         self.hist_ax.set_title("Overall totals distribution")
         self.hist_ax.set_xlabel("Overall total")
         self.hist_ax.set_ylabel("Count")
@@ -2334,14 +2337,12 @@ class App:
         curve_k = float(self.curve_preview_var.get())
 
         for sid, sname, lab in students:
-            q1, q2 = load_student_assignment(self.grade_con, sid)
-            q1t = compute_total(self.grade_con, sid, q1)
-            q2t = compute_total(self.grade_con, sid, q2)
-            overall = q1t + q2t
+            graded_count = self.grade_con.execute("SELECT COUNT(DISTINCT question_id) FROM rubric_scores WHERE student_id=?", (sid,)).fetchone()[0]
+            overall = compute_overall_total(self.grade_con, sid)
             curved = max(0.0, overall * curve_k)
             self.sum_tree.insert(
                 "", "end",
-                values=(sid, sname, lab, q1 or "", f"{q1t:g}", q2 or "", f"{q2t:g}", f"{overall:g}", f"{curved:.2f}")
+                values=(sid, sname, lab, graded_count, f"{overall:g}", f"{curved:.2f}")
             )
 
         stats_text = self.compute_class_stats_text()
