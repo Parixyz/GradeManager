@@ -1536,8 +1536,12 @@ class ScanWindow(tk.Toplevel):
         self._skim_step_idx = 0
         self.selected_folder_key: str | None = None
 
+        self._last_folder_selection: tuple[str, ...] = ()
+        self._last_scan_file_selection: tuple[str, ...] = ()
+
         self._build()
         self.load_existing_rows_from_db()
+        self.after(120, self._poll_scan_selections)
 
     def _build(self):
         top = ttk.Frame(self, padding=10, style="Pastel.TFrame")
@@ -1605,7 +1609,6 @@ class ScanWindow(tk.Toplevel):
             self.tree.heading(c, text=c)
             self.tree.column(c, width=w, anchor="w")
         self.tree.grid(row=1, column=0, sticky="nsew")
-        self.tree.bind("<<TreeviewSelect>>", self.on_folder_select)
 
         ttk.Label(left, text="Student list (valid ID + name)", style="Pastel.TLabel").grid(row=2, column=0, sticky="w", pady=(10, 0))
         student_cols = ("student_id", "student_name", "lab_id", "folder", "nfiles")
@@ -1662,7 +1665,6 @@ class ScanWindow(tk.Toplevel):
         self.files_tree.heading("file", text="file path")
         self.files_tree.column("file", width=520, anchor="w")
         self.files_tree.grid(row=1, column=0, sticky="nsew")
-        self.files_tree.bind("<<TreeviewSelect>>", self.on_file_select)
 
         preview_frame = ttk.Frame(right, style="Pastel.TFrame")
         preview_frame.grid(row=2, column=0, sticky="nsew")
@@ -1690,6 +1692,21 @@ class ScanWindow(tk.Toplevel):
         self.preview.bind("<Control-f>", lambda _e: self.focus_find_entry())
         self.bind("<KeyPress-q>", lambda _e: self.stop_skimming())
         self.bind("<Escape>", lambda _e: self.stop_skimming())
+
+    def _poll_scan_selections(self):
+        folder_sel = tuple(self.tree.selection())
+        if folder_sel != self._last_folder_selection:
+            self._last_folder_selection = folder_sel
+            if folder_sel:
+                self.on_folder_select()
+
+        file_sel = tuple(self.files_tree.selection())
+        if file_sel != self._last_scan_file_selection:
+            self._last_scan_file_selection = file_sel
+            if file_sel:
+                self.on_scan_file_select()
+
+        self.after(120, self._poll_scan_selections)
 
     def choose_root(self):
         folder = filedialog.askdirectory(title="Select ROOT submissions folder")
@@ -2100,7 +2117,7 @@ class ScanWindow(tk.Toplevel):
 
         self.preview.delete("1.0", tk.END)
 
-    def on_file_select(self, _evt=None, file_iid: str | None = None):
+    def on_scan_file_select(self, _evt=None, file_iid: str | None = None):
         if file_iid is not None:
             sel = (file_iid,)
         else:
@@ -2350,8 +2367,7 @@ class ScanWindow(tk.Toplevel):
         self.files_tree.see(iid)
         self.files_tree.focus_set()
         self.update_idletasks()
-        self.files_tree.event_generate("<<TreeviewSelect>>")
-        self.on_file_select(file_iid=iid)
+        self.on_scan_file_select(file_iid=iid)
         return True
 
     def start_skimming(self):
@@ -2562,8 +2578,27 @@ class App:
         # Optional auto-grader
         self.auto_grader = AutoGrader(enabled=DEFAULT_AI_ENABLED)
 
+        self._grade_last_student_selection: tuple[int, ...] = ()
+        self._grade_last_file_selection: tuple[int, ...] = ()
+
         self._build_ui()
         self.refresh_students(keep_selected=False)
+        self.root.after(120, self._poll_grade_selections)
+
+    def _poll_grade_selections(self):
+        student_sel = tuple(self.student_list.curselection())
+        if student_sel != self._grade_last_student_selection:
+            self._grade_last_student_selection = student_sel
+            if student_sel:
+                self.on_student_select()
+
+        file_sel = tuple(self.file_list.curselection())
+        if file_sel != self._grade_last_file_selection:
+            self._grade_last_file_selection = file_sel
+            if file_sel:
+                self.on_grade_file_select()
+
+        self.root.after(120, self._poll_grade_selections)
 
     def require_grading_db(self) -> bool:
         if self.grade_con is None:
@@ -2646,12 +2681,10 @@ class App:
         ttk.Label(left, text="Students", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
         self.student_list = tk.Listbox(left, bg=self.palette["panel"], fg=self.palette["text"], highlightthickness=0, selectbackground=self.palette["select"])
         self.student_list.grid(row=1, column=0, sticky="nsew")
-        self.student_list.bind("<<ListboxSelect>>", self.on_student_select)
 
         ttk.Label(left, text="Files", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=2, column=0, sticky="w", pady=(10, 0))
         self.file_list = tk.Listbox(left, height=8, bg=self.palette["panel"], fg=self.palette["text"], highlightthickness=0, selectbackground=self.palette["select"])
         self.file_list.grid(row=3, column=0, sticky="nsew")
-        self.file_list.bind("<<ListboxSelect>>", self.on_file_select)
 
         # MIDDLE preview + comments
         mid = ttk.Frame(main, style="PastelCard.TFrame", padding=10)
@@ -2999,7 +3032,7 @@ class App:
         self.load_student_question_view()
         self.refresh_summary()
 
-    def on_file_select(self, _evt=None):
+    def on_grade_file_select(self, _evt=None):
         sel = self.file_list.curselection()
         if not sel:
             return
