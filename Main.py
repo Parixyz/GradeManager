@@ -1165,6 +1165,15 @@ class PDFExporter:
             ]))
             story.append(tbl2)
 
+        # Full code listing with highlighted markers
+        story.append(PageBreak())
+        story.append(Paragraph("<b>Full Code Listing (Highlighted lines marked with '&gt;&gt;')</b>", styles["Heading2"]))
+        blocks = self._build_highlighted_code_blocks(sid)
+        for bi, btxt in enumerate(blocks):
+            story.append(Preformatted(btxt, styles["Code"]))
+            if bi < len(blocks) - 1:
+                story.append(PageBreak())
+
         doc.build(story)
 
     def export_summary_pdf(self, out_path: Path, class_stats_text: str):
@@ -1206,16 +1215,21 @@ class PDFExporter:
 
         doc.build(story)
 
-    def export_all_students_pdfs(self, out_dir: Path, progress_cb=None):
+    def export_all_students_pdfs(self, out_dir: Path, report_tag: str = "Midterm", progress_cb=None):
         out_dir.mkdir(parents=True, exist_ok=True)
         students = self.sub_con.execute("""
-          SELECT student_id
+          SELECT student_id, COALESCE(lab_id,'')
           FROM students
           WHERE LOWER(student_id) <> 'full'
           ORDER BY student_id
         """).fetchall()
-        for i, (sid,) in enumerate(students, start=1):
-            out_path = out_dir / f"{sid}_report.pdf"
+
+        safe_tag = re.sub(r"[^A-Za-z0-9_-]+", "", (report_tag or "Midterm").strip()) or "Midterm"
+
+        for i, (sid, lab) in enumerate(students, start=1):
+            safe_lab = re.sub(r"[^A-Za-z0-9_-]+", "", (lab or "").strip()) or "LabX"
+            out_name = f"{sid}_Report_{safe_lab}_{safe_tag}.pdf"
+            out_path = out_dir / out_name
             try:
                 self.export_student_pdf(sid, out_path)
             except Exception as e:
@@ -1225,6 +1239,12 @@ class PDFExporter:
                 continue
             if progress_cb:
                 progress_cb(i, len(students), sid, True, "")
+
+    def export_compare_to_full_pdfs(self, out_dir: Path, report_tag: str = "Midterm", progress_cb=None):
+        """
+        Alias for batch export naming used from the "Compare to FULL" workflow.
+        """
+        self.export_all_students_pdfs(out_dir=out_dir, report_tag=report_tag, progress_cb=progress_cb)
 
 
 # =============================================================================
@@ -1574,9 +1594,11 @@ class ScanWindow(tk.Toplevel):
         right.columnconfigure(0, weight=1)
 
         ttk.Label(right, text="Files in Selected Folder", style="Pastel.TLabel").grid(row=0, column=0, sticky="w")
-        self.files_list = tk.Listbox(right, height=10, exportselection=False)
-        self.files_list.grid(row=1, column=0, sticky="nsew")
-        self.files_list.bind("<<ListboxSelect>>", self.on_file_select)
+        self.files_tree = ttk.Treeview(right, columns=("file",), show="headings", height=10, selectmode="browse")
+        self.files_tree.heading("file", text="file path")
+        self.files_tree.column("file", width=520, anchor="w")
+        self.files_tree.grid(row=1, column=0, sticky="nsew")
+        self.files_tree.bind("<<TreeviewSelect>>", self.on_file_select)
 
         preview_frame = ttk.Frame(right, style="Pastel.TFrame")
         preview_frame.grid(row=2, column=0, sticky="nsew")
@@ -1615,7 +1637,8 @@ class ScanWindow(tk.Toplevel):
         self.folder_order.clear()
         for item in self.tree.get_children():
             self.tree.delete(item)
-        self.files_list.delete(0, tk.END)
+        for item in self.files_tree.get_children():
+            self.files_tree.delete(item)
         self.preview.delete("1.0", tk.END)
 
     def _parse_globs(self) -> list[str]:
@@ -2006,17 +2029,18 @@ class ScanWindow(tk.Toplevel):
         self.lab_id_var.set(r.get("lab_id",""))
         self._suspend_auto_apply = False
 
-        self.files_list.delete(0, tk.END)
-        for fp in r["files"]:
-            self.files_list.insert(tk.END, fp)
+        for item in self.files_tree.get_children():
+            self.files_tree.delete(item)
+        for idx, fp in enumerate(r["files"]):
+            self.files_tree.insert("", "end", iid=f"file-{idx}", values=(fp,))
 
         self.preview.delete("1.0", tk.END)
 
     def on_file_select(self, _evt=None):
-        sel = self.files_list.curselection()
+        sel = self.files_tree.selection()
         if not sel:
             return
-        fp = self.files_list.get(sel[0])
+        fp = self.files_tree.item(sel[0], "values")[0]
         try:
             content = Path(fp).read_text(encoding="utf-8", errors="ignore")
         except Exception as e:
@@ -2253,15 +2277,15 @@ class ScanWindow(tk.Toplevel):
 
     def _select_file_in_current_folder(self, file_idx: int) -> bool:
         self.update_idletasks()
-        size = self.files_list.size()
+        children = self.files_tree.get_children()
+        size = len(children)
         if file_idx < 0 or file_idx >= size:
             return False
-        self.files_list.selection_clear(0, tk.END)
-        self.files_list.selection_set(file_idx)
-        self.files_list.selection_anchor(file_idx)
-        self.files_list.activate(file_idx)
-        self.files_list.see(file_idx)
-        self.files_list.event_generate("<<ListboxSelect>>")
+        iid = children[file_idx]
+        self.files_tree.selection_set(iid)
+        self.files_tree.focus(iid)
+        self.files_tree.see(iid)
+        self.files_tree.event_generate("<<TreeviewSelect>>")
         self.on_file_select()
         return True
 
@@ -2578,6 +2602,7 @@ class App:
         ttk.Button(codebar, text="Add comment to selection", command=self.add_comment_to_selection).pack(side=tk.LEFT)
         ttk.Button(codebar, text="Clear comments in selection", command=self.clear_comments_in_selection).pack(side=tk.LEFT, padx=6)
         ttk.Button(codebar, text="Compare to FULL", command=self.compare_to_full).pack(side=tk.LEFT, padx=6)
+        ttk.Button(codebar, text="Export All (Compare-to-FULL naming)", command=self.export_compare_to_full_pdfs).pack(side=tk.LEFT, padx=6)
         ttk.Button(codebar, text="Export PDF (this student)", command=self.export_student_pdf).pack(side=tk.RIGHT)
 
         preview_frame = ttk.Frame(mid, style="PastelCard.TFrame")
@@ -2865,6 +2890,8 @@ class App:
 
         for sid, name, lab, file_count in rows:
             if (sid or "").strip().lower() == "full":
+                continue
+            if not has_required_student_fields(sid, name):
                 continue
             lab_txt = f" | Lab:{lab}" if lab else ""
             self.student_list.insert(tk.END, f"{sid} — {name}{lab_txt} | files: {file_count}")
@@ -3313,6 +3340,14 @@ class App:
         if not out_dir:
             return
 
+        report_tag = simpledialog.askstring(
+            "Report tag",
+            "Enter report tag to include in filename (example: Midterm):",
+            initialvalue="Midterm"
+        )
+        if report_tag is None:
+            return
+
         exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map)
 
         prog = tk.Toplevel(self.root)
@@ -3333,7 +3368,55 @@ class App:
             prog.update_idletasks()
 
         try:
-            exporter.export_all_students_pdfs(Path(out_dir), progress_cb=progress_cb)
+            exporter.export_all_students_pdfs(Path(out_dir), report_tag=report_tag, progress_cb=progress_cb)
+        except Exception as e:
+            messagebox.showerror("Batch export failed", str(e))
+            prog.destroy()
+            return
+
+        prog.destroy()
+        messagebox.showinfo("Done", f"Saved PDFs to:\n{out_dir}")
+
+    def export_compare_to_full_pdfs(self):
+        if not self.require_grading_db():
+            return
+        if SimpleDocTemplate is None:
+            messagebox.showinfo("PDF missing", "reportlab not installed. Install: pip install reportlab")
+            return
+
+        out_dir = filedialog.askdirectory(title="Choose output folder (Compare-to-FULL naming)")
+        if not out_dir:
+            return
+
+        report_tag = simpledialog.askstring(
+            "Report tag",
+            "Enter report tag (example: Midterm):",
+            initialvalue="Midterm"
+        )
+        if report_tag is None:
+            return
+
+        exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map)
+
+        prog = tk.Toplevel(self.root)
+        prog.title("Exporting Compare-to-FULL PDFs...")
+        prog.geometry("520x140")
+        lbl = ttk.Label(prog, text="Starting...", style="Pastel.TLabel")
+        lbl.pack(pady=10)
+        pb = ttk.Progressbar(prog, orient="horizontal", length=480, mode="determinate")
+        pb.pack(pady=10)
+
+        def progress_cb(i, n, sid, ok, err):
+            pb["maximum"] = n
+            pb["value"] = i
+            if ok:
+                lbl.config(text=f"[{i}/{n}] Exported: {sid}")
+            else:
+                lbl.config(text=f"[{i}/{n}] Failed: {sid} ({err})")
+            prog.update_idletasks()
+
+        try:
+            exporter.export_compare_to_full_pdfs(Path(out_dir), report_tag=report_tag, progress_cb=progress_cb)
         except Exception as e:
             messagebox.showerror("Batch export failed", str(e))
             prog.destroy()
