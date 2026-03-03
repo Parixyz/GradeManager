@@ -997,6 +997,47 @@ class PDFExporter:
             blocks.append(txt[i:i+max_chars_per_block])
         return blocks
 
+    def _extract_code_snippet(self, file_path: str, start_index: str, end_index: str, max_chars: int = 420) -> str:
+        code = get_file_content(self.sub_con, file_path)
+        if code is None:
+            try:
+                code = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                code = ""
+
+        lines = code.splitlines(keepends=True)
+        if not lines:
+            return ""
+
+        def parse_idx(idx: str):
+            try:
+                a, b = str(idx).split(".", 1)
+                return max(1, int(a)), max(0, int(b))
+            except Exception:
+                return 1, 0
+
+        s_line, s_col = parse_idx(start_index)
+        e_line, e_col = parse_idx(end_index)
+        s_line = min(max(1, s_line), len(lines))
+        e_line = min(max(1, e_line), len(lines))
+        if (e_line, e_col) < (s_line, s_col):
+            s_line, e_line = e_line, s_line
+            s_col, e_col = e_col, s_col
+
+        if s_line == e_line:
+            snippet = lines[s_line - 1][s_col:e_col]
+        else:
+            parts = [lines[s_line - 1][s_col:]]
+            for ln in range(s_line, e_line - 1):
+                parts.append(lines[ln])
+            parts.append(lines[e_line - 1][:e_col])
+            snippet = "".join(parts)
+
+        snippet = snippet.strip("\n\r ")
+        if len(snippet) > max_chars:
+            snippet = snippet[:max_chars].rstrip() + " …"
+        return snippet
+
     def export_student_pdf(self, sid: str, out_path: Path):
         if SimpleDocTemplate is None:
             raise RuntimeError("reportlab not installed. Install: pip install reportlab")
@@ -1009,7 +1050,15 @@ class PDFExporter:
         lab = srow[1] if srow else ""
 
         styles = getSampleStyleSheet()
-        doc = SimpleDocTemplate(str(out_path), pagesize=letter, title=f"{sid} grading report")
+        doc = SimpleDocTemplate(
+            str(out_path),
+            pagesize=letter,
+            title=f"{sid} grading report",
+            leftMargin=28,
+            rightMargin=28,
+            topMargin=28,
+            bottomMargin=28,
+        )
 
         story = []
         story.append(Paragraph("<b>Grading Report</b>", styles["Title"]))
@@ -1031,18 +1080,37 @@ class PDFExporter:
             cols = fetch_columns_for_question(self.grade_con, qid)
             score_map, note_map = load_student_scores(self.grade_con, sid, qid)
 
+            cell_style = styles["BodyText"].clone("rubric_cell_style")
+            cell_style.fontSize = 8
+            cell_style.leading = 10
+
             table_data = [["Group", "Criterion", "Max", "Pts", "Note"]]
             for col_key, group, text, mx in cols:
                 pts = score_map.get(col_key, 0.0) or 0.0
                 note = (note_map.get(col_key, "") or "")
-                table_data.append([group or "", text, f"{mx:g}", f"{pts:g}", note[:180]])
+                esc_group = (group or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                esc_text = (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                esc_note = note[:240].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                table_data.append([
+                    Paragraph(esc_group, cell_style),
+                    Paragraph(esc_text, cell_style),
+                    f"{mx:g}",
+                    f"{pts:g}",
+                    Paragraph(esc_note, cell_style),
+                ])
 
-            tbl = Table(table_data, colWidths=[70, 245, 40, 40, 160])
+            tbl = Table(table_data, colWidths=[80, 180, 40, 40, 216], repeatRows=1)
             tbl.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE7FF")),
-                ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE5FF")),
+                ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#3B2D5C")),
+                ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#B7B7B7")),
                 ("VALIGN", (0,0), (-1,-1), "TOP"),
                 ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+                ("FONTSIZE", (0,0), (-1,-1), 8),
+                ("LEFTPADDING", (0,0), (-1,-1), 4),
+                ("RIGHTPADDING", (0,0), (-1,-1), 4),
+                ("TOPPADDING", (0,0), (-1,-1), 3),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 3),
             ]))
             story.append(tbl)
             story.append(Spacer(1, 10))
@@ -1054,39 +1122,57 @@ class PDFExporter:
                 story.append(Paragraph(rationale.replace("\n", "<br/>"), styles["Normal"]))
                 story.append(Spacer(1, 10))
 
-        # Code section: injected comments
+        # Highlighted code + comments table (compact, printable)
         story.append(PageBreak())
-        story.append(Paragraph("<b>Annotated Code Snapshot (Injected Comments)</b>", styles["Heading2"]))
-        injected = self._build_annotated_code_injected(sid)
-        story.append(Preformatted(injected[:120000], styles["Code"]))
+        story.append(Paragraph("<b>Highlighted Code Review</b>", styles["Heading2"]))
+        story.append(Paragraph("Lemon = highlighted code, light purple = comment.", styles["Normal"]))
+        rows = fetch_code_comments_for_student(self.grade_con, sid)
+        if not rows:
+            story.append(Paragraph("(No code comments.)", styles["Normal"]))
+        else:
+            cell_style = styles["BodyText"].clone("comment_cell_style")
+            cell_style.fontSize = 8
+            cell_style.leading = 10
 
-        # Code section: simulated highlight listing with markers
+            td = [["File", "Range", "Code (highlighted part)", "Comment", "Time"]]
+            for fp, sidx, eidx, txt, _color, ts in rows:
+                snippet = self._extract_code_snippet(fp, sidx, eidx)
+                esc_file = Path(fp).name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                esc_snippet = (snippet or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                esc_comment = (txt or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                td.append([
+                    Paragraph(esc_file, cell_style),
+                    Paragraph(f"{sidx}–{eidx}", cell_style),
+                    Paragraph(esc_snippet or "(empty selection)", cell_style),
+                    Paragraph(esc_comment[:320], cell_style),
+                    Paragraph((ts or "")[:16], cell_style),
+                ])
+
+            tbl2 = Table(td, colWidths=[70, 80, 170, 170, 66], repeatRows=1)
+            tbl2.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE5FF")),
+                ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#FF4FA3")),
+                ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#B7B7B7")),
+                ("VALIGN", (0,0), (-1,-1), "TOP"),
+                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+                ("BACKGROUND", (2,1), (2,-1), colors.HexColor("#FFF9A6")),
+                ("BACKGROUND", (3,1), (3,-1), colors.HexColor("#F3ECFF")),
+                ("FONTSIZE", (0,0), (-1,-1), 8),
+                ("LEFTPADDING", (0,0), (-1,-1), 4),
+                ("RIGHTPADDING", (0,0), (-1,-1), 4),
+                ("TOPPADDING", (0,0), (-1,-1), 3),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+            ]))
+            story.append(tbl2)
+
+        # Full code listing with highlighted markers
         story.append(PageBreak())
-        story.append(Paragraph("<b>Code Listing (Highlighted Lines Marked with '>>')</b>", styles["Heading2"]))
+        story.append(Paragraph("<b>Full Code Listing (Highlighted lines marked with '&gt;&gt;')</b>", styles["Heading2"]))
         blocks = self._build_highlighted_code_blocks(sid)
         for bi, btxt in enumerate(blocks):
             story.append(Preformatted(btxt, styles["Code"]))
             if bi < len(blocks) - 1:
                 story.append(PageBreak())
-
-        # Comments table (all files)
-        story.append(PageBreak())
-        story.append(Paragraph("<b>Code Comments (All Files)</b>", styles["Heading2"]))
-        rows = fetch_code_comments_for_student(self.grade_con, sid)
-        if not rows:
-            story.append(Paragraph("(No code comments.)", styles["Normal"]))
-        else:
-            td = [["File", "Range", "Comment", "Time"]]
-            for fp, sidx, eidx, txt, _color, ts in rows:
-                td.append([Path(fp).name, f"{sidx}–{eidx}", (txt or "")[:260], ts or ""])
-            tbl2 = Table(td, colWidths=[120, 90, 280, 60])
-            tbl2.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#DFF6FF")),
-                ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
-                ("VALIGN", (0,0), (-1,-1), "TOP"),
-                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-            ]))
-            story.append(tbl2)
 
         doc.build(story)
 
@@ -1120,7 +1206,7 @@ class PDFExporter:
 
         tbl = Table(td, colWidths=[90, 170, 80, 110, 80])
         tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE7FF")),
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE5FF")),
             ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
             ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
             ("VALIGN", (0,0), (-1,-1), "TOP"),
@@ -1129,16 +1215,21 @@ class PDFExporter:
 
         doc.build(story)
 
-    def export_all_students_pdfs(self, out_dir: Path, progress_cb=None):
+    def export_all_students_pdfs(self, out_dir: Path, report_tag: str = "Midterm", progress_cb=None):
         out_dir.mkdir(parents=True, exist_ok=True)
         students = self.sub_con.execute("""
-          SELECT student_id
+          SELECT student_id, COALESCE(lab_id,'')
           FROM students
           WHERE LOWER(student_id) <> 'full'
           ORDER BY student_id
         """).fetchall()
-        for i, (sid,) in enumerate(students, start=1):
-            out_path = out_dir / f"{sid}_report.pdf"
+
+        safe_tag = re.sub(r"[^A-Za-z0-9_-]+", "", (report_tag or "Midterm").strip()) or "Midterm"
+
+        for i, (sid, lab) in enumerate(students, start=1):
+            safe_lab = re.sub(r"[^A-Za-z0-9_-]+", "", (lab or "").strip()) or "LabX"
+            out_name = f"{sid}_Report_{safe_lab}_{safe_tag}.pdf"
+            out_path = out_dir / out_name
             try:
                 self.export_student_pdf(sid, out_path)
             except Exception as e:
@@ -1148,6 +1239,12 @@ class PDFExporter:
                 continue
             if progress_cb:
                 progress_cb(i, len(students), sid, True, "")
+
+    def export_compare_to_full_pdfs(self, out_dir: Path, report_tag: str = "Midterm", progress_cb=None):
+        """
+        Alias for batch export naming used from the "Compare to FULL" workflow.
+        """
+        self.export_all_students_pdfs(out_dir=out_dir, report_tag=report_tag, progress_cb=progress_cb)
 
 
 # =============================================================================
@@ -1287,12 +1384,12 @@ def pastel_style(root: tk.Tk):
     except Exception:
         pass
 
-    bg = "#F7F4FF"        # very light lavender
-    panel = "#FFF7E8"     # light warm cream
-    accent = "#C9B6FF"    # lavender
-    accent2 = "#B7E3FF"   # baby blue
+    bg = "#F7F2FF"        # very light purple
+    panel = "#FFFDE8"     # lemon-cream yellow
+    accent = "#DCCBFF"    # light purple
+    accent2 = "#FF4FA3"   # bright pink (used sparingly: active states)
     text = "#2A2440"
-    select = "#E6DCFF"
+    select = "#EFE5FF"
 
     root.configure(bg=bg)
 
@@ -1497,9 +1594,11 @@ class ScanWindow(tk.Toplevel):
         right.columnconfigure(0, weight=1)
 
         ttk.Label(right, text="Files in Selected Folder", style="Pastel.TLabel").grid(row=0, column=0, sticky="w")
-        self.files_list = tk.Listbox(right, height=10, exportselection=False)
-        self.files_list.grid(row=1, column=0, sticky="nsew")
-        self.files_list.bind("<<ListboxSelect>>", self.on_file_select)
+        self.files_tree = ttk.Treeview(right, columns=("file",), show="headings", height=10, selectmode="browse")
+        self.files_tree.heading("file", text="file path")
+        self.files_tree.column("file", width=520, anchor="w")
+        self.files_tree.grid(row=1, column=0, sticky="nsew")
+        self.files_tree.bind("<<TreeviewSelect>>", self.on_file_select)
 
         preview_frame = ttk.Frame(right, style="Pastel.TFrame")
         preview_frame.grid(row=2, column=0, sticky="nsew")
@@ -1521,7 +1620,9 @@ class ScanWindow(tk.Toplevel):
         ttk.Button(find_row, text="Find Next", command=self.find_next).pack(side=tk.LEFT)
 
         self.preview.bind("<KeyPress-i>", self._hotkey_use_id)
+        self.preview.bind("<KeyPress-I>", self._hotkey_use_id)
         self.preview.bind("<KeyPress-n>", self._hotkey_use_name)
+        self.preview.bind("<KeyPress-N>", self._hotkey_use_name)
         self.preview.bind("<Control-f>", lambda _e: self.focus_find_entry())
         self.bind("<KeyPress-q>", lambda _e: self.stop_skimming())
         self.bind("<Escape>", lambda _e: self.stop_skimming())
@@ -1536,7 +1637,8 @@ class ScanWindow(tk.Toplevel):
         self.folder_order.clear()
         for item in self.tree.get_children():
             self.tree.delete(item)
-        self.files_list.delete(0, tk.END)
+        for item in self.files_tree.get_children():
+            self.files_tree.delete(item)
         self.preview.delete("1.0", tk.END)
 
     def _parse_globs(self) -> list[str]:
@@ -1927,17 +2029,18 @@ class ScanWindow(tk.Toplevel):
         self.lab_id_var.set(r.get("lab_id",""))
         self._suspend_auto_apply = False
 
-        self.files_list.delete(0, tk.END)
-        for fp in r["files"]:
-            self.files_list.insert(tk.END, fp)
+        for item in self.files_tree.get_children():
+            self.files_tree.delete(item)
+        for idx, fp in enumerate(r["files"]):
+            self.files_tree.insert("", "end", iid=f"file-{idx}", values=(fp,))
 
         self.preview.delete("1.0", tk.END)
 
     def on_file_select(self, _evt=None):
-        sel = self.files_list.curselection()
+        sel = self.files_tree.selection()
         if not sel:
             return
-        fp = self.files_list.get(sel[0])
+        fp = self.files_tree.item(sel[0], "values")[0]
         try:
             content = Path(fp).read_text(encoding="utf-8", errors="ignore")
         except Exception as e:
@@ -2050,10 +2153,27 @@ class ScanWindow(tk.Toplevel):
         selected = self._selected_preview_text()
         if not selected:
             return
+        # Prefer numeric extraction, but still allow full raw selection so
+        # quick-paste IDs such as NAME:... or custom keys can be used.
         only_id = extract_numeric_id(selected)
-        if not only_id:
-            return
-        self.final_id_var.set(only_id)
+        self.final_id_var.set(only_id if only_id else selected)
+
+    def _selected_folder_from_tree(self) -> str | None:
+        sel = self.tree.selection()
+        folder_key = sel[0] if sel else self.tree.focus()
+        if not folder_key:
+            return None
+        return folder_key if folder_key in self.rows else None
+
+    def _build_skimmable_sequence(self, start_folder_key: str | None) -> list[str]:
+        folders = self._get_skimmable_folders()
+        if not folders:
+            return []
+        if not start_folder_key or start_folder_key not in folders:
+            return folders
+
+        start_idx = folders.index(start_folder_key)
+        return folders[start_idx:] + folders[:start_idx]
 
     def use_selection_as_name(self):
         selected = self._selected_preview_text()
@@ -2157,15 +2277,15 @@ class ScanWindow(tk.Toplevel):
 
     def _select_file_in_current_folder(self, file_idx: int) -> bool:
         self.update_idletasks()
-        size = self.files_list.size()
+        children = self.files_tree.get_children()
+        size = len(children)
         if file_idx < 0 or file_idx >= size:
             return False
-        self.files_list.selection_clear(0, tk.END)
-        self.files_list.selection_set(file_idx)
-        self.files_list.selection_anchor(file_idx)
-        self.files_list.activate(file_idx)
-        self.files_list.see(file_idx)
-        self.files_list.event_generate("<<ListboxSelect>>")
+        iid = children[file_idx]
+        self.files_tree.selection_set(iid)
+        self.files_tree.focus(iid)
+        self.files_tree.see(iid)
+        self.files_tree.event_generate("<<TreeviewSelect>>")
         self.on_file_select()
         return True
 
@@ -2179,7 +2299,8 @@ class ScanWindow(tk.Toplevel):
             messagebox.showinfo("Skimming", "No rows loaded. Scan folders or load from DB first.")
             return
 
-        self._skimmable_folder_keys = self._get_skimmable_folders()
+        start_folder_key = self._selected_folder_from_tree()
+        self._skimmable_folder_keys = self._build_skimmable_sequence(start_folder_key)
         if not self._skimmable_folder_keys:
             messagebox.showinfo("Skimming", "No folders with files to skim.")
             return
@@ -2197,7 +2318,7 @@ class ScanWindow(tk.Toplevel):
             messagebox.showinfo("Skimming", "No files available for skimming.")
             return
 
-        # Always start from index 0 for consistent skimming across the full list.
+        # Start from selected folder when possible (then continue through the rest).
         self._skim_step_idx = 0
         self._skim_folder_idx = 0
         self._skim_file_idx = 0
@@ -2481,6 +2602,7 @@ class App:
         ttk.Button(codebar, text="Add comment to selection", command=self.add_comment_to_selection).pack(side=tk.LEFT)
         ttk.Button(codebar, text="Clear comments in selection", command=self.clear_comments_in_selection).pack(side=tk.LEFT, padx=6)
         ttk.Button(codebar, text="Compare to FULL", command=self.compare_to_full).pack(side=tk.LEFT, padx=6)
+        ttk.Button(codebar, text="Export All (Compare-to-FULL naming)", command=self.export_compare_to_full_pdfs).pack(side=tk.LEFT, padx=6)
         ttk.Button(codebar, text="Export PDF (this student)", command=self.export_student_pdf).pack(side=tk.RIGHT)
 
         preview_frame = ttk.Frame(mid, style="PastelCard.TFrame")
@@ -2498,7 +2620,7 @@ class App:
         sb.grid(row=0, column=1, sticky="ns")
         self.preview.configure(yscrollcommand=sb.set)
 
-        self.preview.tag_configure("comment_highlight", background="#FFF2B2")
+        self.preview.tag_configure("comment_highlight", background="#FFF9A6")
 
         # RIGHT grading
         right = ttk.Frame(main, style="PastelCard.TFrame", padding=10)
@@ -2769,6 +2891,8 @@ class App:
         for sid, name, lab, file_count in rows:
             if (sid or "").strip().lower() == "full":
                 continue
+            if not has_required_student_fields(sid, name):
+                continue
             lab_txt = f" | Lab:{lab}" if lab else ""
             self.student_list.insert(tk.END, f"{sid} — {name}{lab_txt} | files: {file_count}")
             self.student_ids.append(sid)
@@ -2868,7 +2992,7 @@ class App:
         txt = simpledialog.askstring("Add comment", "Comment for highlighted code:")
         if not txt:
             return
-        add_code_comment(self.grade_con, self.selected_student_id, self.selected_file_path, sidx, eidx, txt, color="#FFF2B2")
+        add_code_comment(self.grade_con, self.selected_student_id, self.selected_file_path, sidx, eidx, txt, color="#FFF9A6")
         self._apply_comments_highlights()
 
     def clear_comments_in_selection(self):
@@ -3216,6 +3340,14 @@ class App:
         if not out_dir:
             return
 
+        report_tag = simpledialog.askstring(
+            "Report tag",
+            "Enter report tag to include in filename (example: Midterm):",
+            initialvalue="Midterm"
+        )
+        if report_tag is None:
+            return
+
         exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map)
 
         prog = tk.Toplevel(self.root)
@@ -3236,7 +3368,55 @@ class App:
             prog.update_idletasks()
 
         try:
-            exporter.export_all_students_pdfs(Path(out_dir), progress_cb=progress_cb)
+            exporter.export_all_students_pdfs(Path(out_dir), report_tag=report_tag, progress_cb=progress_cb)
+        except Exception as e:
+            messagebox.showerror("Batch export failed", str(e))
+            prog.destroy()
+            return
+
+        prog.destroy()
+        messagebox.showinfo("Done", f"Saved PDFs to:\n{out_dir}")
+
+    def export_compare_to_full_pdfs(self):
+        if not self.require_grading_db():
+            return
+        if SimpleDocTemplate is None:
+            messagebox.showinfo("PDF missing", "reportlab not installed. Install: pip install reportlab")
+            return
+
+        out_dir = filedialog.askdirectory(title="Choose output folder (Compare-to-FULL naming)")
+        if not out_dir:
+            return
+
+        report_tag = simpledialog.askstring(
+            "Report tag",
+            "Enter report tag (example: Midterm):",
+            initialvalue="Midterm"
+        )
+        if report_tag is None:
+            return
+
+        exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map)
+
+        prog = tk.Toplevel(self.root)
+        prog.title("Exporting Compare-to-FULL PDFs...")
+        prog.geometry("520x140")
+        lbl = ttk.Label(prog, text="Starting...", style="Pastel.TLabel")
+        lbl.pack(pady=10)
+        pb = ttk.Progressbar(prog, orient="horizontal", length=480, mode="determinate")
+        pb.pack(pady=10)
+
+        def progress_cb(i, n, sid, ok, err):
+            pb["maximum"] = n
+            pb["value"] = i
+            if ok:
+                lbl.config(text=f"[{i}/{n}] Exported: {sid}")
+            else:
+                lbl.config(text=f"[{i}/{n}] Failed: {sid} ({err})")
+            prog.update_idletasks()
+
+        try:
+            exporter.export_compare_to_full_pdfs(Path(out_dir), report_tag=report_tag, progress_cb=progress_cb)
         except Exception as e:
             messagebox.showerror("Batch export failed", str(e))
             prog.destroy()
