@@ -1662,7 +1662,7 @@ class ScanWindow(tk.Toplevel):
         self.files_tree.heading("file", text="file path")
         self.files_tree.column("file", width=520, anchor="w")
         self.files_tree.grid(row=1, column=0, sticky="nsew")
-        self.files_tree.bind("<<TreeviewSelect>>", self.on_file_select)
+        self.files_tree.bind("<<TreeviewSelect>>", self.on_scan_file_select)
 
         preview_frame = ttk.Frame(right, style="Pastel.TFrame")
         preview_frame.grid(row=2, column=0, sticky="nsew")
@@ -2100,7 +2100,7 @@ class ScanWindow(tk.Toplevel):
 
         self.preview.delete("1.0", tk.END)
 
-    def on_file_select(self, _evt=None, file_iid: str | None = None):
+    def on_scan_file_select(self, _evt=None, file_iid: str | None = None):
         if file_iid is not None:
             sel = (file_iid,)
         else:
@@ -2351,7 +2351,7 @@ class ScanWindow(tk.Toplevel):
         self.files_tree.focus_set()
         self.update_idletasks()
         self.files_tree.event_generate("<<TreeviewSelect>>")
-        self.on_file_select(file_iid=iid)
+        self.on_scan_file_select(file_iid=iid)
         return True
 
     def start_skimming(self):
@@ -2651,7 +2651,7 @@ class App:
         ttk.Label(left, text="Files", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=2, column=0, sticky="w", pady=(10, 0))
         self.file_list = tk.Listbox(left, height=8, bg=self.palette["panel"], fg=self.palette["text"], highlightthickness=0, selectbackground=self.palette["select"])
         self.file_list.grid(row=3, column=0, sticky="nsew")
-        self.file_list.bind("<<ListboxSelect>>", self.on_file_select)
+        self.file_list.bind("<<ListboxSelect>>", self.on_grade_file_select)
 
         # MIDDLE preview + comments
         mid = ttk.Frame(main, style="PastelCard.TFrame", padding=10)
@@ -2999,7 +2999,7 @@ class App:
         self.load_student_question_view()
         self.refresh_summary()
 
-    def on_file_select(self, _evt=None):
+    def on_grade_file_select(self, _evt=None):
         sel = self.file_list.curselection()
         if not sel:
             return
