@@ -352,6 +352,11 @@ def db_connect(db_path: Path) -> sqlite3.Connection:
 
 def submissions_db_init(con: sqlite3.Connection):
     con.executescript("""
+    CREATE TABLE IF NOT EXISTS app_meta (
+        meta_key TEXT PRIMARY KEY,
+        meta_value TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS students (
         student_id TEXT PRIMARY KEY,
         student_name TEXT NOT NULL,
@@ -379,6 +384,18 @@ def submissions_db_init(con: sqlite3.Connection):
     except Exception:
         pass
     con.commit()
+
+def sub_meta_set(con: sqlite3.Connection, key: str, value: str):
+    con.execute("""
+      INSERT INTO app_meta(meta_key, meta_value)
+      VALUES(?, ?)
+      ON CONFLICT(meta_key) DO UPDATE SET meta_value=excluded.meta_value
+    """, (key, value))
+    con.commit()
+
+def sub_meta_get(con: sqlite3.Connection, key: str, default: str = "") -> str:
+    row = con.execute("SELECT meta_value FROM app_meta WHERE meta_key=?", (key,)).fetchone()
+    return row[0] if row and row[0] is not None else default
 
 def upsert_student(con: sqlite3.Connection, student_id: str, student_name: str, lab_id: str | None, folder_path: str | None):
     con.execute("""
@@ -1275,6 +1292,11 @@ class ScanWindow(tk.Toplevel):
         self.filename_regex_var = tk.StringVar(value="")  # optional
         self.folder_id_regex_var = tk.StringVar(value="")
         self.folder_name_regex_var = tk.StringVar(value="")
+        self.only_new_files_var = tk.BooleanVar(value=False)
+        self.global_lab_id_var = tk.StringVar(value="")
+        self.find_var = tk.StringVar(value="")
+        self.last_scan_snapshot_path: str = ""
+        self._find_from = "1.0"
 
         self.rows: dict[str, dict] = {}
         self.folder_order: list[str] = []
@@ -1292,8 +1314,10 @@ class ScanWindow(tk.Toplevel):
         ttk.Button(actions, text="Scan Now", command=self.scan).pack(side=tk.LEFT, padx=8)
         ttk.Button(actions, text="Save Scan Snapshot", command=self.save_scan_snapshot).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(actions, text="Load Scan Snapshot", command=self.load_scan_snapshot).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(actions, text="Load Current Snapshot", command=self.load_current_scan_snapshot).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(actions, text="Set Loaded Snapshot as Current", command=self.set_loaded_snapshot_as_current).pack(side=tk.LEFT, padx=(8, 0))
 
-        ttk.Button(actions, text="Commit Scan (Save to DB)", command=self.commit).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="Save Scan to DB", command=self.save_to_db).pack(side=tk.RIGHT)
 
         self.status_lbl = ttk.Label(actions, text="No folder selected.", style="Pastel.TLabel")
         self.status_lbl.pack(side=tk.RIGHT, padx=10)
@@ -1310,6 +1334,7 @@ class ScanWindow(tk.Toplevel):
         ttk.Entry(filters_tab, textvariable=self.file_globs_var, width=30).pack(side=tk.LEFT, padx=(6, 12))
         ttk.Label(filters_tab, text="Filename include-regex (optional)", style="Pastel.TLabel").pack(side=tk.LEFT)
         ttk.Entry(filters_tab, textvariable=self.filename_regex_var, width=34).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Checkbutton(filters_tab, text="Only show files not already registered", variable=self.only_new_files_var).pack(side=tk.LEFT, padx=(12, 0))
 
         ttk.Label(regex_tab, text="Folder ID regex (cap group)", style="Pastel.TLabel").pack(side=tk.LEFT)
         ttk.Entry(regex_tab, textvariable=self.folder_id_regex_var, width=24).pack(side=tk.LEFT, padx=(6, 12))
@@ -1365,6 +1390,16 @@ class ScanWindow(tk.Toplevel):
         self.lab_id_var = tk.StringVar()
         ttk.Entry(mid, textvariable=self.lab_id_var).grid(row=8, column=0, sticky="ew")
 
+        ttk.Label(mid, text="Apply LabID to included folders", style="Pastel.TLabel").grid(row=9, column=0, sticky="w", pady=(10, 0))
+        ttk.Entry(mid, textvariable=self.global_lab_id_var).grid(row=10, column=0, sticky="ew")
+        ttk.Button(mid, text="Apply LabID to All Included", command=self.apply_global_lab_id).grid(row=11, column=0, sticky="ew", pady=(4, 0))
+
+        ttk.Label(mid, text="Selection shortcuts", style="Pastel.TLabel").grid(row=12, column=0, sticky="w", pady=(10, 0))
+        quick = ttk.Frame(mid, style="Pastel.TFrame")
+        quick.grid(row=13, column=0, sticky="ew")
+        ttk.Button(quick, text="Use selected text as ID (I)", command=self.use_selection_as_id).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(quick, text="Use selected text as Name (N)", command=self.use_selection_as_name).pack(side=tk.LEFT)
+
         self._suspend_auto_apply = False
         self._bind_auto_apply()
 
@@ -1388,6 +1423,18 @@ class ScanWindow(tk.Toplevel):
         sb = ttk.Scrollbar(preview_frame, orient="vertical", command=self.preview.yview)
         sb.grid(row=0, column=1, sticky="ns")
         self.preview.configure(yscrollcommand=sb.set)
+        self.preview.tag_configure("find_hit", background="#ffe082")
+
+        find_row = ttk.Frame(right, style="Pastel.TFrame")
+        find_row.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(find_row, text="Find in file", style="Pastel.TLabel").pack(side=tk.LEFT)
+        self.find_entry = ttk.Entry(find_row, textvariable=self.find_var, width=26)
+        self.find_entry.pack(side=tk.LEFT, padx=(6, 6))
+        ttk.Button(find_row, text="Find Next", command=self.find_next).pack(side=tk.LEFT)
+
+        self.preview.bind("<KeyPress-i>", self._hotkey_use_id)
+        self.preview.bind("<KeyPress-n>", self._hotkey_use_name)
+        self.preview.bind("<Control-f>", lambda _e: self.focus_find_entry())
 
     def choose_root(self):
         folder = filedialog.askdirectory(title="Select ROOT submissions folder")
@@ -1432,6 +1479,7 @@ class ScanWindow(tk.Toplevel):
             "filename_regex": (self.filename_regex_var.get() or "").strip(),
             "folder_id_regex": (self.folder_id_regex_var.get() or "").strip(),
             "folder_name_regex": (self.folder_name_regex_var.get() or "").strip(),
+            "only_new_files": bool(self.only_new_files_var.get()),
         }
 
     def save_regex_copy(self):
@@ -1467,6 +1515,7 @@ class ScanWindow(tk.Toplevel):
         self.filename_regex_var.set((payload.get("filename_regex") or "").strip())
         self.folder_id_regex_var.set((payload.get("folder_id_regex") or "").strip())
         self.folder_name_regex_var.set((payload.get("folder_name_regex") or "").strip())
+        self.only_new_files_var.set(bool(payload.get("only_new_files", False)))
         messagebox.showinfo("Loaded", f"Regex copy loaded:\n{path}")
 
     def save_scan_snapshot(self):
@@ -1489,18 +1538,13 @@ class ScanWindow(tk.Toplevel):
         }
         try:
             Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            self.last_scan_snapshot_path = str(path)
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
             return
         messagebox.showinfo("Saved", f"Scan snapshot saved:\n{path}")
 
-    def load_scan_snapshot(self):
-        path = filedialog.askopenfilename(
-            title="Load scan snapshot",
-            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
-        )
-        if not path:
-            return
+    def _load_scan_snapshot_from_path(self, path: str):
         try:
             payload = json.loads(Path(path).read_text(encoding="utf-8"))
         except Exception as e:
@@ -1512,6 +1556,7 @@ class ScanWindow(tk.Toplevel):
         self.filename_regex_var.set((settings.get("filename_regex") or "").strip())
         self.folder_id_regex_var.set((settings.get("folder_id_regex") or "").strip())
         self.folder_name_regex_var.set((settings.get("folder_name_regex") or "").strip())
+        self.only_new_files_var.set(bool(settings.get("only_new_files", False)))
 
         loaded_rows = payload.get("rows") or {}
         loaded_order = payload.get("folder_order") or list(loaded_rows.keys())
@@ -1546,13 +1591,45 @@ class ScanWindow(tk.Toplevel):
                 str(len(files))
             ))
 
+        self.last_scan_snapshot_path = str(path)
         root_text = f"Root: {self.root_folder}" if self.root_folder else "Root: (from snapshot)"
         self.status_lbl.config(text=f"{root_text} | Loaded snapshot. Folders: {len(self.folder_order)} | Files: {total_files} | Detected students: {detected_students} | Blank folders: {blank_folders}")
+
+    def load_scan_snapshot(self):
+        path = filedialog.askopenfilename(
+            title="Load scan snapshot",
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self._load_scan_snapshot_from_path(path)
+
+    def load_current_scan_snapshot(self):
+        path = sub_meta_get(self.con, "current_scan_snapshot", "").strip()
+        if not path:
+            messagebox.showinfo("No current snapshot", "No current scan snapshot is set.")
+            return
+        if not Path(path).exists():
+            messagebox.showerror("Missing file", f"Current snapshot file does not exist:\n{path}")
+            return
+        self._load_scan_snapshot_from_path(path)
+
+    def set_loaded_snapshot_as_current(self):
+        path = (self.last_scan_snapshot_path or "").strip()
+        if not path:
+            messagebox.showinfo("No snapshot", "Save or load a scan snapshot first.")
+            return
+        sub_meta_set(self.con, "current_scan_snapshot", path)
+        messagebox.showinfo("Saved", f"Current scan snapshot set to:\n{path}")
 
     def scan(self):
         if not self.root_folder:
             messagebox.showinfo("Pick folder", "Choose ROOT folder first.")
             return
+
+        existing_files = set()
+        if self.only_new_files_var.get():
+            existing_files = {r[0] for r in self.con.execute("SELECT file_path FROM files").fetchall()}
 
         file_globs = self._parse_globs()
         filename_regex = (self.filename_regex_var.get() or "").strip()
@@ -1576,6 +1653,8 @@ class ScanWindow(tk.Toplevel):
         detected_students = 0
         for sub in folders:
             final_id, final_name, det_id, det_name, files = scanner.detect_folder(sub)
+            if existing_files:
+                files = [fp for fp in files if fp not in existing_files]
             if not files:
                 blank_folders += 1
 
@@ -1648,6 +1727,8 @@ class ScanWindow(tk.Toplevel):
             content = f"Error reading file:\n{e}"
         self.preview.delete("1.0", tk.END)
         self.preview.insert("1.0", content)
+        self.preview.tag_remove("find_hit", "1.0", tk.END)
+        self._find_from = "1.0"
 
     def apply_include_toggle(self):
         folder_key = self.sel_folder_var.get().strip()
@@ -1691,7 +1772,71 @@ class ScanWindow(tk.Toplevel):
             str(len(r["files"]))
         ))
 
-    def commit(self):
+    def apply_global_lab_id(self):
+        lab = (self.global_lab_id_var.get() or "").strip()
+        for folder_key in self.folder_order:
+            r = self.rows.get(folder_key)
+            if not r or not r.get("include"):
+                continue
+            r["lab_id"] = lab
+            self._refresh_tree_row(folder_key)
+
+        current = self.sel_folder_var.get().strip()
+        if current and current in self.rows:
+            self._suspend_auto_apply = True
+            self.lab_id_var.set(self.rows[current].get("lab_id", ""))
+            self._suspend_auto_apply = False
+
+    def _selected_preview_text(self) -> str:
+        try:
+            return self.preview.get("sel.first", "sel.last").strip()
+        except tk.TclError:
+            return ""
+
+    def _hotkey_use_id(self, _evt=None):
+        self.use_selection_as_id()
+        return "break"
+
+    def _hotkey_use_name(self, _evt=None):
+        self.use_selection_as_name()
+        return "break"
+
+    def use_selection_as_id(self):
+        selected = self._selected_preview_text()
+        if not selected:
+            return
+        self.final_id_var.set(selected)
+
+    def use_selection_as_name(self):
+        selected = self._selected_preview_text()
+        if not selected:
+            return
+        self.final_name_var.set(selected)
+
+    def focus_find_entry(self):
+        self.find_entry.focus_set()
+        return "break"
+
+    def find_next(self):
+        query = (self.find_var.get() or "").strip()
+        self.preview.tag_remove("find_hit", "1.0", tk.END)
+        if not query:
+            return
+
+        start = self.preview.search(query, self._find_from, stopindex=tk.END, nocase=True)
+        if not start:
+            start = self.preview.search(query, "1.0", stopindex=tk.END, nocase=True)
+            if not start:
+                return
+
+        end = f"{start}+{len(query)}c"
+        self.preview.tag_add("find_hit", start, end)
+        self.preview.mark_set(tk.INSERT, end)
+        self.preview.see(start)
+        self.preview.focus_set()
+        self._find_from = end
+
+    def save_to_db(self):
         if not self.rows:
             messagebox.showinfo("Nothing", "Scan first.")
             return
@@ -1759,7 +1904,7 @@ class ScanWindow(tk.Toplevel):
 
         self.app.refresh_students(keep_selected=False)
         messagebox.showinfo(
-            "Committed",
+            "Saved",
             f"Folders committed: {committed_folders}\nFolders skipped: {skipped_folders}\nFiles saved: {committed_files}\nStudents created/updated: {created_students}"
         )
 
@@ -1819,6 +1964,7 @@ class App:
         top.pack(side=tk.TOP, fill=tk.X)
 
         ttk.Button(top, text="Open Scan Window", command=self.open_scan_window).pack(side=tk.LEFT)
+        ttk.Button(top, text="Open Current Scan Snapshot", command=self.open_current_scan_snapshot).pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
 
@@ -2022,7 +2168,11 @@ class App:
 
     # ---- scan window ----
     def open_scan_window(self):
-        ScanWindow(self)
+        return ScanWindow(self)
+
+    def open_current_scan_snapshot(self):
+        win = ScanWindow(self)
+        win.load_current_scan_snapshot()
 
     # ---- grading DB open/create ----
     def new_grading_db(self):
