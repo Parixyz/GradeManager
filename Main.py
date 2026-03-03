@@ -1532,8 +1532,6 @@ class ScanWindow(tk.Toplevel):
         self._skim_folder_idx = 0
         self._skim_file_idx = 0
         self._skimmable_folder_keys: list[str] = []
-        self._skim_steps: list[tuple[str, int | None]] = []
-        self._skim_step_idx = 0
         self.selected_folder_key: str | None = None
 
         self._last_folder_selection: tuple[str, ...] = ()
@@ -2348,14 +2346,6 @@ class ScanWindow(tk.Toplevel):
                 str(len(r.get("files") or [])),
             ))
 
-    def _build_skim_steps(self):
-        steps: list[tuple[str, int | None]] = []
-        for folder_key in self._skimmable_folder_keys:
-            files = self.rows.get(folder_key, {}).get("files") or []
-            for idx in range(len(files)):
-                steps.append((folder_key, idx))
-        return steps
-
     def _select_file_in_current_folder(self, file_idx: int) -> bool:
         self.update_idletasks()
         children = self.files_tree.get_children()
@@ -2396,24 +2386,17 @@ class ScanWindow(tk.Toplevel):
             delay = 100
         self.skim_delay_ms_var.set(delay)
 
-        self._skim_steps = self._build_skim_steps()
-        if not self._skim_steps:
-            messagebox.showinfo("Skimming", "No files available for skimming.")
-            return
-
-        # Start from selected folder when possible (then continue through the rest).
-        self._skim_step_idx = 0
         self._skim_folder_idx = 0
         self._skim_file_idx = 0
         self.skim_running = True
-        first_folder, first_file_idx = self._skim_steps[0]
+
+        first_folder_key = self._skimmable_folder_keys[0]
         try:
-            first_folder_idx = self.folder_order.index(first_folder)
+            first_folder_idx = self.folder_order.index(first_folder_key)
             self._select_folder_by_index(first_folder_idx)
-            if first_file_idx is not None:
-                self._select_file_in_current_folder(first_file_idx)
         except Exception:
             pass
+
         self._set_scan_status(prefix="Skimming started")
         self._skim_step()
 
@@ -2427,41 +2410,46 @@ class ScanWindow(tk.Toplevel):
         if not self.skim_running:
             return
 
-        if self._skim_step_idx >= len(self._skim_steps):
+        if self._skim_folder_idx >= len(self._skimmable_folder_keys):
             self.skim_running = False
             self._set_scan_status(prefix="Skimming done")
             return
 
-        folder_key, file_idx = self._skim_steps[self._skim_step_idx]
+        folder_key = self._skimmable_folder_keys[self._skim_folder_idx]
+        files = self.rows.get(folder_key, {}).get("files") or []
+        if not files:
+            self._skim_folder_idx += 1
+            self._skim_file_idx = 0
+            self.after(int(self.skim_delay_ms_var.get()), self._skim_step)
+            return
+
         try:
             folder_idx = self.folder_order.index(folder_key)
         except ValueError:
-            self._skim_step_idx += 1
+            self._skim_folder_idx += 1
+            self._skim_file_idx = 0
             self.after(int(self.skim_delay_ms_var.get()), self._skim_step)
             return
 
-        if not self._select_folder_by_index(folder_idx):
-            self._skim_step_idx += 1
+        current_selected = self._selected_folder_from_tree()
+        if current_selected != folder_key:
+            if not self._select_folder_by_index(folder_idx):
+                self._skim_folder_idx += 1
+                self._skim_file_idx = 0
+                self.after(int(self.skim_delay_ms_var.get()), self._skim_step)
+                return
+
+        if self._skim_file_idx >= len(files):
+            self._skim_folder_idx += 1
+            self._skim_file_idx = 0
             self.after(int(self.skim_delay_ms_var.get()), self._skim_step)
             return
 
-        files = self.rows.get(folder_key, {}).get("files") or []
-        if not files:
-            self._skim_step_idx += 1
-            self.after(int(self.skim_delay_ms_var.get()), self._skim_step)
-            return
-
-        if file_idx is None or file_idx >= len(files):
-            self._skim_step_idx += 1
-            self.after(int(self.skim_delay_ms_var.get()), self._skim_step)
-            return
-
-        selected = self._select_file_in_current_folder(file_idx)
+        selected = self._select_file_in_current_folder(self._skim_file_idx)
         if selected:
-            self._set_scan_status(prefix=f"Skimming: step {self._skim_step_idx + 1}/{len(self._skim_steps)} | folder {self._skimmable_folder_keys.index(folder_key) + 1}/{len(self._skimmable_folder_keys)}, file {file_idx + 1}/{len(files)}")
+            self._set_scan_status(prefix=f"Skimming: student {self._skim_folder_idx + 1}/{len(self._skimmable_folder_keys)}, file {self._skim_file_idx + 1}/{len(files)}")
 
-        self._skim_step_idx += 1
-
+        self._skim_file_idx += 1
         self.after(int(self.skim_delay_ms_var.get()), self._skim_step)
 
     def save_to_db(self):
