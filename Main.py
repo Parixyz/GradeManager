@@ -2213,13 +2213,11 @@ class ScanWindow(tk.Toplevel):
 
         for folder_key in self.folder_order:
             r = self.rows[folder_key]
-            if not r["include"]:
-                skipped_folders += 1
-                continue
             if not r.get("files"):
                 skipped_folders += 1
                 continue
 
+            include_row = bool(r.get("include"))
             fid = (r["final_id"] or "").strip()
             fname = (r["final_name"] or "").strip()
             lab = (r.get("lab_id") or "").strip() or None
@@ -2229,13 +2227,15 @@ class ScanWindow(tk.Toplevel):
             if normalized_sid.lower() != "full":
                 normalized_sid = extract_numeric_id(normalized_sid)
 
-            if student_ok and normalized_sid:
+            if include_row and student_ok and normalized_sid:
                 upsert_student(self.con, normalized_sid, fname, lab, r.get("folder") or folder_key)
                 created_students += 1
-            elif student_ok and (fid or "").strip().lower() == "full":
+            elif include_row and student_ok and (fid or "").strip().lower() == "full":
                 upsert_student(self.con, "FULL", fname or "FULL", lab, r.get("folder") or folder_key)
                 normalized_sid = "FULL"
                 created_students += 1
+            elif not include_row:
+                skipped_folders += 1
 
             for fp in r["files"]:
                 p = Path(fp)
@@ -2252,10 +2252,10 @@ class ScanWindow(tk.Toplevel):
                 upsert_file(
                     self.con,
                     file_path=fp,
-                    student_id=normalized_sid if student_ok and normalized_sid else None,
+                    student_id=normalized_sid if include_row and student_ok and normalized_sid else None,
                     source_folder=r.get("folder") or folder_key,
-                    detected_id=r["det_id"] or None,
-                    detected_name=r["det_name"] or None,
+                    detected_id=fid or r["det_id"] or None,
+                    detected_name=fname or r["det_name"] or None,
                     file_hash=file_hash,
                     file_content=file_text
                 )
