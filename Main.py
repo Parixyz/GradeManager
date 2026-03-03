@@ -2067,13 +2067,10 @@ class ScanWindow(tk.Toplevel):
         return steps
 
     def _select_file_in_current_folder(self, file_idx: int) -> bool:
-        self.update_idletasks()
-        size = self.files_list.size()
-        if file_idx < 0 or file_idx >= size:
+        if file_idx < 0 or file_idx >= self.files_list.size():
             return False
         self.files_list.selection_clear(0, tk.END)
         self.files_list.selection_set(file_idx)
-        self.files_list.selection_anchor(file_idx)
         self.files_list.activate(file_idx)
         self.files_list.see(file_idx)
         self.files_list.event_generate("<<ListboxSelect>>")
@@ -2082,10 +2079,7 @@ class ScanWindow(tk.Toplevel):
 
     def start_skimming(self):
         if not self.folder_order:
-            if self.root_folder:
-                self.scan()
-            else:
-                self.load_existing_rows_from_db()
+            self.load_existing_rows_from_db()
         if not self.folder_order:
             messagebox.showinfo("Skimming", "No rows loaded. Scan folders or load from DB first.")
             return
