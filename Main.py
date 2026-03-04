@@ -354,10 +354,24 @@ class FolderScannerBase:
         self.folder_name_regex = folder_name_regex
 
     def collect_folders(self) -> list[Path]:
-        folders = [p for p in self.root_folder.iterdir() if p.is_dir()]
-        root_has_any = any(any(self.root_folder.glob(g)) for g in self.file_globs)
-        if root_has_any:
-            folders = [self.root_folder] + folders
+        folders: list[Path] = []
+        seen: set[str] = set()
+
+        for folder in [self.root_folder] + [p for p in self.root_folder.rglob("*") if p.is_dir()]:
+            has_match = False
+            for g in self.file_globs:
+                if any(folder.glob(g)):
+                    has_match = True
+                    break
+            if not has_match:
+                continue
+
+            key = str(folder)
+            if key in seen:
+                continue
+            seen.add(key)
+            folders.append(folder)
+
         return folders
 
     def detect_folder(self, folder: Path):
@@ -1791,6 +1805,7 @@ class ScanWindow(tk.Toplevel):
         ttk.Label(skim_tab, text="Skim delay (ms)", style="Pastel.TLabel").pack(side=tk.LEFT)
         ttk.Entry(skim_tab, textvariable=self.skim_delay_ms_var, width=7).pack(side=tk.LEFT, padx=(6, 10))
         ttk.Button(skim_tab, text="Start Skimming (from selected)", command=self.start_skimming).pack(side=tk.LEFT)
+        ttk.Button(skim_tab, text="Skim Unassigned", command=self.start_skimming_unassigned).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(skim_tab, text="Stop Skimming", command=self.stop_skimming).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(skim_tab, text="Stop keys: Q / Esc", style="Pastel.TLabel").pack(side=tk.LEFT, padx=(12, 0))
 
@@ -1874,7 +1889,7 @@ class ScanWindow(tk.Toplevel):
         self.files_tree.bind("<<TreeviewSelect>>", self.on_scan_file_select)
 
         preview_frame = ttk.Frame(right, style="Pastel.TFrame")
-        preview_frame.grid(row=4, column=0, sticky="nsew")
+        preview_frame.grid(row=3, column=0, sticky="nsew")
         preview_frame.rowconfigure(0, weight=1)
         preview_frame.columnconfigure(0, weight=1)
 
@@ -2481,8 +2496,8 @@ class ScanWindow(tk.Toplevel):
         folder_key = sel[0]
         return folder_key if folder_key in self.rows else None
 
-    def _build_skimmable_sequence(self, start_folder_key: str | None) -> list[str]:
-        folders = self._get_skimmable_folders()
+    def _build_skimmable_sequence(self, start_folder_key: str | None, only_unassigned: bool = False) -> list[str]:
+        folders = self._get_skimmable_folders(only_unassigned=only_unassigned)
         if not folders:
             return []
         if not start_folder_key or start_folder_key not in folders:
@@ -2520,14 +2535,17 @@ class ScanWindow(tk.Toplevel):
         self.preview.focus_set()
         self._find_from = end
 
-    def _get_skimmable_folders(self) -> list[str]:
+    def _get_skimmable_folders(self, only_unassigned: bool = False) -> list[str]:
         """
         Skim every folder that has at least one file so names/IDs can be verified quickly.
+        Optional: keep only unassigned/non-student folders.
         """
         out = []
         for folder_key in self.folder_order:
             row = self.rows.get(folder_key) or {}
             if not (row.get("files") or []):
+                continue
+            if only_unassigned and has_required_student_fields(row.get("final_id", ""), row.get("final_name", "")):
                 continue
             out.append(folder_key)
         return out
@@ -2595,7 +2613,7 @@ class ScanWindow(tk.Toplevel):
         self.on_scan_file_select(file_iid=iid)
         return True
 
-    def start_skimming(self):
+    def start_skimming(self, only_unassigned: bool = False):
         if not self.folder_order:
             if self.root_folder:
                 self.scan()
@@ -2606,9 +2624,12 @@ class ScanWindow(tk.Toplevel):
             return
 
         start_folder_key = self._selected_folder_from_tree()
-        self._skimmable_folder_keys = self._build_skimmable_sequence(start_folder_key)
+        self._skimmable_folder_keys = self._build_skimmable_sequence(start_folder_key, only_unassigned=only_unassigned)
         if not self._skimmable_folder_keys:
-            messagebox.showinfo("Skimming", "No folders with files to skim.")
+            if only_unassigned:
+                messagebox.showinfo("Skimming", "No unassigned/non-student folders with files to skim.")
+            else:
+                messagebox.showinfo("Skimming", "No folders with files to skim.")
             return
 
         try:
@@ -2634,6 +2655,9 @@ class ScanWindow(tk.Toplevel):
         self._skim_seen_files = 0
         self._set_scan_status(prefix="Skimming started")
         self.after(int(self.skim_delay_ms_var.get()), self._skim_step)
+
+    def start_skimming_unassigned(self):
+        self.start_skimming(only_unassigned=True)
 
     def stop_skimming(self):
         if self.skim_running:
@@ -2949,33 +2973,23 @@ class App:
         # MIDDLE preview + comments
         mid = ttk.Frame(main, style="PastelCard.TFrame", padding=10)
         mid.grid(row=0, column=1, sticky="nsew", padx=(0, 10))
-        mid.rowconfigure(2, weight=1)
+        mid.rowconfigure(3, weight=1)
         mid.columnconfigure(0, weight=1)
 
         self.student_header = ttk.Label(mid, text="No student selected", style="PastelCard.TLabel", font=("Segoe UI", 12, "bold"))
         self.student_header.grid(row=0, column=0, sticky="w")
 
-        timebar = ttk.Frame(mid, style="PastelCard.TFrame")
-        timebar.grid(row=1, column=0, sticky="ew", pady=(4, 2))
-        self.session_clock_lbl = ttk.Label(timebar, text="Session: 00:00", style="PastelCard.TLabel")
-        self.session_clock_lbl.pack(side=tk.LEFT)
-        ttk.Button(timebar, text="Start Timer", command=self.start_session_timer).pack(side=tk.LEFT, padx=(8, 4))
-        ttk.Button(timebar, text="Pause Timer", command=self.pause_session_timer).pack(side=tk.LEFT, padx=4)
-        ttk.Button(timebar, text="Reset Timer", command=self.reset_session_timer).pack(side=tk.LEFT, padx=4)
-        ttk.Button(timebar, text="Mark Assessed", command=self.mark_current_student_assessed).pack(side=tk.RIGHT)
-        ttk.Label(timebar, textvariable=self.progress_var, style="PastelCard.TLabel").pack(side=tk.RIGHT)
-
         self.grade_meta_lbl = ttk.Label(mid, textvariable=self.grade_meta_var, style="PastelCard.TLabel")
-        self.grade_meta_lbl.grid(row=2, column=0, sticky="w", pady=(0, 4))
+        self.grade_meta_lbl.grid(row=1, column=0, sticky="w", pady=(4, 4))
 
         codebar = ttk.Frame(mid, style="PastelCard.TFrame")
-        codebar.grid(row=3, column=0, sticky="ew", pady=(6, 6))
+        codebar.grid(row=2, column=0, sticky="ew", pady=(6, 6))
         ttk.Button(codebar, text="Add comment to selection", command=self.add_comment_to_selection).pack(side=tk.LEFT)
         ttk.Button(codebar, text="Clear comments in selection", command=self.clear_comments_in_selection).pack(side=tk.LEFT, padx=6)
         ttk.Button(codebar, text="Export PDF (this student)", command=self.export_student_pdf).pack(side=tk.RIGHT)
 
         preview_frame = ttk.Frame(mid, style="PastelCard.TFrame")
-        preview_frame.grid(row=4, column=0, sticky="nsew")
+        preview_frame.grid(row=3, column=0, sticky="nsew")
         preview_frame.rowconfigure(0, weight=1)
         preview_frame.columnconfigure(0, weight=1)
 
@@ -3078,6 +3092,16 @@ class App:
         self.progress_header_lbl = ttk.Label(top, text="", style="Pastel.TLabel")
         self.progress_header_lbl.pack(side=tk.RIGHT)
 
+        controls = ttk.Frame(self.tab_progress, style="Pastel.TFrame")
+        controls.pack(fill=tk.X, pady=(8, 0))
+        self.session_clock_lbl = ttk.Label(controls, text="Session: 00:00", style="Pastel.TLabel")
+        self.session_clock_lbl.pack(side=tk.LEFT)
+        ttk.Button(controls, text="Start Timer", command=self.start_session_timer).pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Button(controls, text="Pause Timer", command=self.pause_session_timer).pack(side=tk.LEFT, padx=4)
+        ttk.Button(controls, text="Reset Timer", command=self.reset_session_timer).pack(side=tk.LEFT, padx=4)
+        ttk.Button(controls, text="Mark Assessed", command=self.mark_current_student_assessed).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(controls, textvariable=self.progress_var, style="Pastel.TLabel").pack(side=tk.RIGHT)
+
         cols = ("student_id", "student_name", "graded", "scored_q", "rationale_q", "first_graded", "last_updated", "last_question")
         self.progress_tree = ttk.Treeview(self.tab_progress, columns=cols, show="headings", height=25)
         for c, w in [("student_id",120),("student_name",180),("graded",80),("scored_q",90),("rationale_q",100),("first_graded",160),("last_updated",160),("last_question",120)]:
@@ -3148,6 +3172,7 @@ class App:
         ttk.Button(top, text="Save Profile", command=self.save_regex_profile).pack(side=tk.LEFT)
         ttk.Button(top, text="Save Copy As...", command=self.save_regex_profile_copy_as).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Commit", command=self.commit_regex_profile).pack(side=tk.LEFT)
+        ttk.Button(top, text="Open Scan / Rescan", command=self.open_scan_window).pack(side=tk.LEFT, padx=(10, 0))
 
         form = ttk.Frame(self.tab_regex, style="Pastel.TFrame")
         form.pack(fill=tk.X, pady=(10, 0))
@@ -3347,20 +3372,60 @@ class App:
             return
         win = tk.Toplevel(self.root)
         win.title("Scheme Generator / Editor")
-        win.geometry("1200x760")
+        win.geometry("1280x820")
 
         top = ttk.Frame(win, style="Pastel.TFrame", padding=8)
         top.pack(fill=tk.X)
 
-        text = tk.Text(win, wrap="none")
-        text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        body = ttk.Panedwindow(win, orient=tk.VERTICAL)
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        text_wrap = ttk.Frame(body, style="Pastel.TFrame")
+        preview_wrap = ttk.Frame(body, style="Pastel.TFrame")
+        body.add(text_wrap, weight=3)
+        body.add(preview_wrap, weight=2)
+
+        text = tk.Text(text_wrap, wrap="none")
+        text.pack(fill=tk.BOTH, expand=True)
 
         header = "question_id,question_title,group,col_key,col_text,col_max,col_order,sub_id\n"
         text.insert("1.0", header)
 
+        preview_cols = ("question_id", "question_title", "group", "col_key", "col_text", "col_max", "col_order", "sub_id")
+        ttk.Label(preview_wrap, text="Scheme table preview", style="Pastel.TLabel").pack(anchor="w", pady=(0, 4))
+        tree = ttk.Treeview(preview_wrap, columns=preview_cols, show="headings", height=12)
+        col_widths = {
+            "question_id": 100,
+            "question_title": 220,
+            "group": 120,
+            "col_key": 90,
+            "col_text": 360,
+            "col_max": 70,
+            "col_order": 80,
+            "sub_id": 90,
+        }
+        for c in preview_cols:
+            tree.heading(c, text=c)
+            tree.column(c, width=col_widths.get(c, 120), anchor="w")
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        def refresh_preview():
+            for item in tree.get_children():
+                tree.delete(item)
+            raw = text.get("1.0", tk.END).strip()
+            if not raw:
+                return
+            try:
+                reader = csv.DictReader(io.StringIO(raw))
+                for idx, row in enumerate(reader, start=1):
+                    tree.insert("", "end", iid=f"scheme-{idx}", values=tuple((row.get(c, "") or "").strip() for c in preview_cols))
+            except Exception:
+                return
+
         def do_new():
             text.delete("1.0", tk.END)
             text.insert("1.0", header)
+            refresh_preview()
 
         def do_load():
             path = filedialog.askopenfilename(title="Load scheme CSV", filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
@@ -3373,6 +3438,7 @@ class App:
                 return
             text.delete("1.0", tk.END)
             text.insert("1.0", raw)
+            refresh_preview()
 
         def do_save():
             path = filedialog.asksaveasfilename(title="Save scheme CSV", defaultextension=".csv", filetypes=[("CSV", "*.csv")])
@@ -3409,7 +3475,11 @@ class App:
         ttk.Button(top, text="New", command=do_new).pack(side=tk.LEFT)
         ttk.Button(top, text="Load CSV", command=do_load).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Save CSV", command=do_save).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Preview Table", command=refresh_preview).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Set as Current Scheme", command=do_set_current).pack(side=tk.LEFT, padx=6)
+
+        text.bind("<KeyRelease>", lambda _e: refresh_preview())
+        refresh_preview()
 
     def auto_export_pack(self):
         if not self.require_grading_db():
