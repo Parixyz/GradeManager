@@ -492,7 +492,7 @@ def commit_scan_session(con: sqlite3.Connection, root_folder: str, lab_id: str, 
     )
     con.commit()
 
-def upsert_student(con: sqlite3.Connection, student_id: str, student_name: str, lab_id: str | None, folder_path: str | None, included: bool = True):
+def upsert_student(con: sqlite3.Connection, student_id: str, student_name: str, lab_id: str | None, folder_path: str | None, included: bool = True, commit: bool = True):
     con.execute("""
     INSERT INTO students(student_id, student_name, lab_id, folder_path, included)
     VALUES(?, ?, ?, ?, ?)
@@ -502,17 +502,20 @@ def upsert_student(con: sqlite3.Connection, student_id: str, student_name: str, 
       folder_path=COALESCE(excluded.folder_path, students.folder_path),
       included=excluded.included
     """, (student_id, student_name, lab_id, folder_path, 1 if included else 0))
-    con.commit()
+    if commit:
+        con.commit()
 
 
-def set_student_included(con: sqlite3.Connection, student_id: str, included: bool):
+def set_student_included(con: sqlite3.Connection, student_id: str, included: bool, commit: bool = True):
     con.execute("UPDATE students SET included=? WHERE student_id=?", (1 if included else 0, student_id))
-    con.commit()
+    if commit:
+        con.commit()
 
 def upsert_file(con: sqlite3.Connection, file_path: str, student_id: str | None,
                 source_folder: str | None,
                 detected_id: str | None, detected_name: str | None,
-                file_hash: str | None, file_content: str | None):
+                file_hash: str | None, file_content: str | None,
+                commit: bool = True):
     con.execute("""
     INSERT INTO files(file_path, student_id, source_folder, detected_id, detected_name, file_hash, file_content, last_seen)
     VALUES(?, ?, ?, ?, ?, ?, ?, ?)
@@ -525,7 +528,8 @@ def upsert_file(con: sqlite3.Connection, file_path: str, student_id: str | None,
       file_content=excluded.file_content,
       last_seen=excluded.last_seen
     """, (file_path, student_id, source_folder, detected_id, detected_name, file_hash, file_content, now_ts()))
-    con.commit()
+    if commit:
+        con.commit()
 
 def get_students(con: sqlite3.Connection):
     cur = con.execute("""
@@ -618,6 +622,14 @@ def grading_db_init(con: sqlite3.Connection):
       q1 TEXT,
       q2 TEXT,
       updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS grading_progress(
+      student_id TEXT PRIMARY KEY,
+      graded INTEGER NOT NULL DEFAULT 0,
+      first_graded_at TEXT,
+      last_updated_at TEXT,
+      last_question_id TEXT
     );
 
     CREATE TABLE IF NOT EXISTS code_comments(
@@ -786,7 +798,7 @@ def load_student_scores(con: sqlite3.Connection, student_id: str, question_id: s
         note_map[k] = n
     return score_map, note_map
 
-def upsert_score(con: sqlite3.Connection, student_id: str, question_id: str, col_key: str, points: float | None, note: str):
+def upsert_score(con: sqlite3.Connection, student_id: str, question_id: str, col_key: str, points: float | None, note: str, commit: bool = True):
     con.execute("""
       INSERT INTO rubric_scores(student_id, question_id, col_key, points, note, updated_at)
       VALUES(?,?,?,?,?,?)
@@ -795,7 +807,8 @@ def upsert_score(con: sqlite3.Connection, student_id: str, question_id: str, col
         note=excluded.note,
         updated_at=excluded.updated_at
     """, (student_id, question_id, col_key, points, note, now_ts()))
-    con.commit()
+    if commit:
+        con.commit()
 
 def compute_total(con: sqlite3.Connection, student_id: str, question_id: str | None) -> float:
     if not question_id:
@@ -814,7 +827,7 @@ def compute_overall_total(con: sqlite3.Connection, student_id: str) -> float:
       WHERE student_id=?
     """, (student_id,)).fetchone()
     return float(row[0] if row else 0.0)
-def upsert_student_note(con: sqlite3.Connection, student_id: str, question_id: str, rationale: str, overall_grade: float | None):
+def upsert_student_note(con: sqlite3.Connection, student_id: str, question_id: str, rationale: str, overall_grade: float | None, commit: bool = True):
     con.execute("""
       INSERT INTO student_notes(student_id, question_id, rationale, overall_grade, updated_at)
       VALUES(?,?,?,?,?)
@@ -823,7 +836,8 @@ def upsert_student_note(con: sqlite3.Connection, student_id: str, question_id: s
         overall_grade=excluded.overall_grade,
         updated_at=excluded.updated_at
     """, (student_id, question_id, rationale, overall_grade, now_ts()))
-    con.commit()
+    if commit:
+        con.commit()
 
 def load_student_note(con: sqlite3.Connection, student_id: str, question_id: str):
     return con.execute("""
@@ -846,6 +860,53 @@ def load_student_assignment(con: sqlite3.Connection, student_id: str) -> tuple[s
     if not row:
         return None, None
     return (row[0] or None), (row[1] or None)
+
+
+def upsert_grading_progress(con: sqlite3.Connection, student_id: str, question_id: str | None = None, mark_graded: bool = True, commit: bool = True):
+    now = now_ts()
+    con.execute("""
+      INSERT INTO grading_progress(student_id, graded, first_graded_at, last_updated_at, last_question_id)
+      VALUES(?,?,?,?,?)
+      ON CONFLICT(student_id) DO UPDATE SET
+        graded=CASE WHEN excluded.graded=1 THEN 1 ELSE grading_progress.graded END,
+        first_graded_at=CASE
+          WHEN grading_progress.first_graded_at IS NULL OR grading_progress.first_graded_at='' THEN
+            CASE WHEN excluded.graded=1 THEN excluded.first_graded_at ELSE grading_progress.first_graded_at END
+          ELSE grading_progress.first_graded_at
+        END,
+        last_updated_at=excluded.last_updated_at,
+        last_question_id=COALESCE(excluded.last_question_id, grading_progress.last_question_id)
+    """, (student_id, 1 if mark_graded else 0, now if mark_graded else None, now, question_id))
+    if commit:
+        con.commit()
+
+
+def set_student_graded_flag(con: sqlite3.Connection, student_id: str, graded: bool, commit: bool = True):
+    now = now_ts()
+    con.execute("""
+      INSERT INTO grading_progress(student_id, graded, first_graded_at, last_updated_at)
+      VALUES(?,?,?,?)
+      ON CONFLICT(student_id) DO UPDATE SET
+        graded=excluded.graded,
+        first_graded_at=CASE
+          WHEN excluded.graded=1 AND (grading_progress.first_graded_at IS NULL OR grading_progress.first_graded_at='') THEN excluded.first_graded_at
+          WHEN excluded.graded=0 THEN NULL
+          ELSE grading_progress.first_graded_at
+        END,
+        last_updated_at=excluded.last_updated_at
+    """, (student_id, 1 if graded else 0, now if graded else None, now))
+    if commit:
+        con.commit()
+
+
+def load_grading_progress(con: sqlite3.Connection, student_id: str):
+    row = con.execute("""
+      SELECT graded, COALESCE(first_graded_at,''), COALESCE(last_updated_at,''), COALESCE(last_question_id,'')
+      FROM grading_progress WHERE student_id=?
+    """, (student_id,)).fetchone()
+    if not row:
+        return (0, "", "", "")
+    return row
 
 def add_code_comment(con: sqlite3.Connection, student_id: str, file_path: str, start_index: str, end_index: str,
                      comment_text: str, color: str = "#FFF2B2"):
@@ -1536,6 +1597,10 @@ class ScrollableRubricGrid(ttk.Frame):
         self.columns = []
         self.score_vars = {}
         self.note_vars = {}
+        self._change_callback = None
+
+    def set_change_callback(self, callback):
+        self._change_callback = callback
 
     def build(self, columns):
         for w in self.inner.winfo_children():
@@ -1567,6 +1632,9 @@ class ScrollableRubricGrid(ttk.Frame):
 
             sv = tk.StringVar(value="")
             nv = tk.StringVar(value="")
+            if self._change_callback is not None:
+                sv.trace_add("write", lambda *_args: self._change_callback())
+                nv.trace_add("write", lambda *_args: self._change_callback())
             ttk.Entry(self.inner, textvariable=sv, width=8).grid(row=r, column=1, sticky="w", padx=6, pady=4)
             ttk.Entry(self.inner, textvariable=nv, width=60).grid(row=r, column=2, sticky="ew", padx=6, pady=4)
 
@@ -1740,9 +1808,9 @@ class ScanWindow(tk.Toplevel):
         left.rowconfigure(3, weight=2)
         ttk.Label(left, text="Full list (all scanned folders)", style="Pastel.TLabel").grid(row=0, column=0, sticky="w")
 
-        cols = ("include", "folder", "det_id", "det_name", "final_id", "final_name", "lab_id", "nfiles")
+        cols = ("is_student", "folder", "det_id", "det_name", "final_id", "final_name", "lab_id", "nfiles")
         self.tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
-        for c, w in [("include", 70), ("folder", 330), ("det_id", 120), ("det_name", 160),
+        for c, w in [("is_student", 80), ("folder", 330), ("det_id", 120), ("det_name", 160),
                      ("final_id", 160), ("final_name", 170), ("lab_id", 90), ("nfiles", 70)]:
             self.tree.heading(c, text=c)
             self.tree.column(c, width=w, anchor="w")
@@ -1765,7 +1833,7 @@ class ScanWindow(tk.Toplevel):
         ttk.Entry(mid, textvariable=self.sel_folder_var, state="readonly").grid(row=1, column=0, sticky="ew", pady=(2, 8))
 
         self.include_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(mid, text="Include this folder in commit", variable=self.include_var,
+        ttk.Checkbutton(mid, text="IsStudent (include in grading)", variable=self.include_var,
                         command=self.apply_include_toggle).grid(row=2, column=0, sticky="w")
 
         ttk.Label(mid, text="Final Student ID", style="Pastel.TLabel").grid(row=3, column=0, sticky="w")
@@ -1780,9 +1848,9 @@ class ScanWindow(tk.Toplevel):
         self.lab_id_var = tk.StringVar()
         ttk.Entry(mid, textvariable=self.lab_id_var).grid(row=8, column=0, sticky="ew")
 
-        ttk.Label(mid, text="Apply LabID to included folders", style="Pastel.TLabel").grid(row=9, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(mid, text="Apply LabID to IsStudent folders", style="Pastel.TLabel").grid(row=9, column=0, sticky="w", pady=(10, 0))
         ttk.Entry(mid, textvariable=self.global_lab_id_var).grid(row=10, column=0, sticky="ew")
-        ttk.Button(mid, text="Apply LabID to All Included", command=self.apply_global_lab_id).grid(row=11, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(mid, text="Apply LabID to All IsStudent", command=self.apply_global_lab_id).grid(row=11, column=0, sticky="ew", pady=(4, 0))
 
         ttk.Label(mid, text="Selection shortcuts", style="Pastel.TLabel").grid(row=12, column=0, sticky="w", pady=(10, 0))
         quick = ttk.Frame(mid, style="Pastel.TFrame")
@@ -1806,7 +1874,7 @@ class ScanWindow(tk.Toplevel):
         self.files_tree.bind("<<TreeviewSelect>>", self.on_scan_file_select)
 
         preview_frame = ttk.Frame(right, style="Pastel.TFrame")
-        preview_frame.grid(row=2, column=0, sticky="nsew")
+        preview_frame.grid(row=4, column=0, sticky="nsew")
         preview_frame.rowconfigure(0, weight=1)
         preview_frame.columnconfigure(0, weight=1)
 
@@ -1914,8 +1982,8 @@ class ScanWindow(tk.Toplevel):
             f"Total Computers: {c['total_computers']}",
             f"Files: {c['files']}",
             f"Total students: {c['total_students']}",
-            f"Included rows: {c['included_rows']}",
-            f"Included students: {c['included_students']}",
+            f"IsStudent rows: {c['included_rows']}",
+            f"IsStudent students: {c['included_students']}",
             f"Blank folders: {c['blank_folders']}",
         ]
         msg = " | ".join(parts)
@@ -2314,7 +2382,7 @@ class ScanWindow(tk.Toplevel):
         row["include"] = bool(self.include_var.get())
         row["manual_include_override"] = row["include"]
         self._refresh_tree_row(folder_key)
-        self.preview.configure(font=self.preview_font_normal if bool(row.get("include")) else self.preview_font_bold)
+        self.preview.configure(font=self.preview_font_normal if bool(self.rows[folder_key].get("include")) else self.preview_font_bold)
         self._reload_student_rows()
         self._set_scan_status(prefix="Scan info")
 
@@ -2348,7 +2416,7 @@ class ScanWindow(tk.Toplevel):
         self._suspend_auto_apply = False
 
         self._refresh_tree_row(folder_key)
-        self.preview.configure(font=self.preview_font_normal if bool(row.get("include")) else self.preview_font_bold)
+        self.preview.configure(font=self.preview_font_normal if bool(self.rows[folder_key].get("include")) else self.preview_font_bold)
         self._reload_student_rows()
         self._set_scan_status(prefix="Scan info")
 
@@ -2634,59 +2702,61 @@ class ScanWindow(tk.Toplevel):
         created_students = 0
         skipped_folders = 0
 
-        for folder_key in self.folder_order:
-            r = self.rows[folder_key]
-            if not r.get("files"):
-                skipped_folders += 1
-                continue
+        with self.con:
+            for folder_key in self.folder_order:
+                r = self.rows[folder_key]
+                if not r.get("files"):
+                    skipped_folders += 1
+                    continue
 
-            include_row = bool(r.get("include"))
-            fid = (r["final_id"] or "").strip()
-            fname = (r["final_name"] or "").strip()
-            lab = (r.get("lab_id") or "").strip() or None
+                include_row = bool(r.get("include"))
+                fid = (r["final_id"] or "").strip()
+                fname = (r["final_name"] or "").strip()
+                lab = (r.get("lab_id") or "").strip() or None
 
-            student_ok = has_required_student_fields(fid, fname)
-            normalized_sid = (fid or "").strip()
-            if normalized_sid.lower() != "full":
-                normalized_sid = extract_numeric_id(normalized_sid)
+                student_ok = has_required_student_fields(fid, fname)
+                normalized_sid = (fid or "").strip()
+                if normalized_sid.lower() != "full":
+                    normalized_sid = extract_numeric_id(normalized_sid)
 
-            if include_row and student_ok and normalized_sid:
-                upsert_student(self.con, normalized_sid, fname, lab, r.get("folder") or folder_key, included=True)
-                created_students += 1
-            elif include_row and student_ok and (fid or "").strip().lower() == "full":
-                upsert_student(self.con, "FULL", fname or "FULL", lab, r.get("folder") or folder_key, included=True)
-                normalized_sid = "FULL"
-                created_students += 1
-            elif not include_row:
-                skipped_folders += 1
-                if student_ok and normalized_sid:
-                    set_student_included(self.con, normalized_sid, False)
+                if include_row and student_ok and normalized_sid:
+                    upsert_student(self.con, normalized_sid, fname, lab, r.get("folder") or folder_key, included=True, commit=False)
+                    created_students += 1
+                elif include_row and student_ok and (fid or "").strip().lower() == "full":
+                    upsert_student(self.con, "FULL", fname or "FULL", lab, r.get("folder") or folder_key, included=True, commit=False)
+                    normalized_sid = "FULL"
+                    created_students += 1
+                elif not include_row:
+                    skipped_folders += 1
+                    if student_ok and normalized_sid:
+                        set_student_included(self.con, normalized_sid, False, commit=False)
 
-            for fp in r["files"]:
-                p = Path(fp)
-                file_text = None
-                file_hash = None
-                try:
-                    if store_content:
-                        file_text = read_file_text(p)
-                        file_hash = sha256_text(file_text)
-                except Exception:
+                for fp in r["files"]:
+                    pth = Path(fp)
                     file_text = None
                     file_hash = None
+                    try:
+                        if store_content:
+                            file_text = read_file_text(pth)
+                            file_hash = sha256_text(file_text)
+                    except Exception:
+                        file_text = None
+                        file_hash = None
 
-                upsert_file(
-                    self.con,
-                    file_path=fp,
-                    student_id=normalized_sid if include_row and student_ok and normalized_sid else None,
-                    source_folder=r.get("folder") or folder_key,
-                    detected_id=fid or r["det_id"] or None,
-                    detected_name=fname or r["det_name"] or None,
-                    file_hash=file_hash,
-                    file_content=file_text
-                )
-                committed_files += 1
+                    upsert_file(
+                        self.con,
+                        file_path=fp,
+                        student_id=normalized_sid if include_row and student_ok and normalized_sid else None,
+                        source_folder=r.get("folder") or folder_key,
+                        detected_id=fid or r["det_id"] or None,
+                        detected_name=fname or r["det_name"] or None,
+                        file_hash=file_hash,
+                        file_content=file_text,
+                        commit=False,
+                    )
+                    committed_files += 1
 
-            committed_folders += 1
+                committed_folders += 1
 
         self.app.refresh_students(keep_selected=False)
         if show_message:
@@ -2731,7 +2801,15 @@ class App:
         self.selected_file_path: str | None = None
 
         self.question_map: dict[str, str] = {}
+        self.question_display_to_id: dict[str, str] = {}
         self.selected_question_id: str | None = None
+        self.question_pick_var = tk.StringVar(value="")
+        self._auto_save_job = None
+        self._suspend_auto_save = False
+        self.session_started_at = datetime.now()
+        self.grade_meta_var = tk.StringVar(value="Graded: NO | First graded: - | Last updated: -")
+        self.progress_var = tk.StringVar(value="Progress: assessed 0/0 | left 0")
+        self._clock_job = None
 
         # curve preview factor (histogram overlay)
         self.curve_preview_var = tk.DoubleVar(value=1.0)
@@ -2819,18 +2897,22 @@ class App:
         self.tab_grade = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_summary = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_stats = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
+        self.tab_progress = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_regex = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
 
         self.nb.add(self.tab_grade, text="Grade")
         self.nb.add(self.tab_summary, text="Summary")
         self.nb.add(self.tab_stats, text="Stats")
+        self.nb.add(self.tab_progress, text="Progress")
         self.nb.add(self.tab_regex, text="Regex / Patterns")
 
         self._build_grade_tab()
         self._build_summary_tab()
         self._build_stats_tab()
+        self._build_progress_tab()
         self._build_regex_tab()
         self._ensure_default_regex_profile()
+        self._tick_session_clock()
 
     def _build_grade_tab(self):
         main = ttk.Frame(self.tab_grade, style="Pastel.TFrame")
@@ -2865,14 +2947,24 @@ class App:
         self.student_header = ttk.Label(mid, text="No student selected", style="PastelCard.TLabel", font=("Segoe UI", 12, "bold"))
         self.student_header.grid(row=0, column=0, sticky="w")
 
+        timebar = ttk.Frame(mid, style="PastelCard.TFrame")
+        timebar.grid(row=1, column=0, sticky="ew", pady=(4, 2))
+        self.session_clock_lbl = ttk.Label(timebar, text="Session: 00:00", style="PastelCard.TLabel")
+        self.session_clock_lbl.pack(side=tk.LEFT)
+        ttk.Button(timebar, text="Reset Timer", command=self.reset_session_timer).pack(side=tk.LEFT, padx=8)
+        ttk.Label(timebar, textvariable=self.progress_var, style="PastelCard.TLabel").pack(side=tk.RIGHT)
+
+        self.grade_meta_lbl = ttk.Label(mid, textvariable=self.grade_meta_var, style="PastelCard.TLabel")
+        self.grade_meta_lbl.grid(row=2, column=0, sticky="w", pady=(0, 4))
+
         codebar = ttk.Frame(mid, style="PastelCard.TFrame")
-        codebar.grid(row=1, column=0, sticky="ew", pady=(6, 6))
+        codebar.grid(row=3, column=0, sticky="ew", pady=(6, 6))
         ttk.Button(codebar, text="Add comment to selection", command=self.add_comment_to_selection).pack(side=tk.LEFT)
         ttk.Button(codebar, text="Clear comments in selection", command=self.clear_comments_in_selection).pack(side=tk.LEFT, padx=6)
         ttk.Button(codebar, text="Export PDF (this student)", command=self.export_student_pdf).pack(side=tk.RIGHT)
 
         preview_frame = ttk.Frame(mid, style="PastelCard.TFrame")
-        preview_frame.grid(row=2, column=0, sticky="nsew")
+        preview_frame.grid(row=4, column=0, sticky="nsew")
         preview_frame.rowconfigure(0, weight=1)
         preview_frame.columnconfigure(0, weight=1)
 
@@ -2898,7 +2990,11 @@ class App:
         self.question_mode_lbl = ttk.Label(right, text="All questions visible in Summary/exports", style="PastelCard.TLabel")
         self.question_mode_lbl.grid(row=1, column=0, sticky="w", pady=(4,8))
 
-        ttk.Separator(right, orient="horizontal").grid(row=2, column=0, sticky="ew", pady=(8,10))
+        self.question_picker = ttk.Combobox(right, textvariable=self.question_pick_var, state="readonly")
+        self.question_picker.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        self.question_picker.bind("<<ComboboxSelected>>", self.on_question_picker_change)
+
+        ttk.Separator(right, orient="horizontal").grid(row=4, column=0, sticky="ew", pady=(8,10))
 
         ttk.Label(right, text="Theme / Instructions (saved in DB)", style="PastelCard.TLabel").grid(row=5, column=0, sticky="w", pady=(10, 0))
         self.theme_text = tk.Text(right, height=4,
@@ -2912,9 +3008,8 @@ class App:
         btns.grid(row=7, column=0, sticky="ew", pady=(8, 8))
 
         ttk.Button(btns, text="Save Theme", command=self.save_theme).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(btns, text="Auto Grade (optional)", command=self.auto_grade_optional).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(btns, text="Fill Random (min-max)", command=self.fill_random_for_current_question).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Save (this question)", command=self.save_scores_and_rationale).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
-        ttk.Button(btns, text="Autofill/Test (assigned × all students)", command=self.make_all_assigned).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Export Grade (selected student)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
 
         ttk.Label(right, text="Rationale (per student, per question)", style="PastelCard.TLabel").grid(row=8, column=0, sticky="w")
@@ -2923,12 +3018,15 @@ class App:
                                       insertbackground=self.palette["text"],
                                       highlightthickness=1, highlightbackground="#E8E1FF")
         self.rationale_text.grid(row=9, column=0, sticky="nsew")
+        self.rationale_text.bind("<KeyRelease>", lambda _e: self.schedule_auto_save())
+        self.rationale_text.bind("<FocusOut>", lambda _e: self.schedule_auto_save())
 
         self.total_lbl = ttk.Label(right, text="Total: -", style="PastelCard.TLabel", font=("Segoe UI", 11, "bold"))
         self.total_lbl.grid(row=10, column=0, sticky="w", pady=(6, 6))
 
         ttk.Label(right, text="Rubric Table (selected question)", style="PastelCard.TLabel").grid(row=11, column=0, sticky="w")
         self.rubric_grid = ScrollableRubricGrid(right)
+        self.rubric_grid.set_change_callback(self.schedule_auto_save)
         self.rubric_grid.grid(row=12, column=0, sticky="nsew")
 
         ttk.Label(right, text="Code comments (this file)", style="PastelCard.TLabel").grid(row=13, column=0, sticky="w", pady=(10,0))
@@ -2944,6 +3042,9 @@ class App:
         ttk.Button(top, text="Export Grade (selected student)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Export This Student PDF", command=self.export_student_pdf).pack(side=tk.LEFT, padx=6)
 
+        self.summary_stats_lbl = ttk.Label(top, text="", style="Pastel.TLabel")
+        self.summary_stats_lbl.pack(side=tk.RIGHT)
+
         cols = ("student_id", "student_name", "lab_id", "graded_questions", "overall", "overall_curved")
         self.sum_tree = ttk.Treeview(self.tab_summary, columns=cols, show="headings", height=25)
         for c, w in [("student_id", 140), ("student_name", 220), ("lab_id", 80),
@@ -2958,6 +3059,24 @@ class App:
             style="Pastel.TLabel"
         )
         note.pack(anchor="w", pady=(8,0))
+
+
+    def _build_progress_tab(self):
+        top = ttk.Frame(self.tab_progress, style="Pastel.TFrame")
+        top.pack(fill=tk.X)
+        ttk.Button(top, text="Refresh Progress", command=self.refresh_progress_tab).pack(side=tk.LEFT)
+        ttk.Button(top, text="Mark selected graded", command=lambda: self.set_selected_student_graded(True)).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Mark selected ungraded", command=lambda: self.set_selected_student_graded(False)).pack(side=tk.LEFT)
+
+        self.progress_header_lbl = ttk.Label(top, text="", style="Pastel.TLabel")
+        self.progress_header_lbl.pack(side=tk.RIGHT)
+
+        cols = ("student_id", "student_name", "graded", "scored_q", "rationale_q", "first_graded", "last_updated", "last_question")
+        self.progress_tree = ttk.Treeview(self.tab_progress, columns=cols, show="headings", height=25)
+        for c, w in [("student_id",120),("student_name",180),("graded",80),("scored_q",90),("rationale_q",100),("first_graded",160),("last_updated",160),("last_question",120)]:
+            self.progress_tree.heading(c, text=c)
+            self.progress_tree.column(c, width=w, anchor="w")
+        self.progress_tree.pack(fill=tk.BOTH, expand=True, pady=(10,0))
 
     def _build_stats_tab(self):
         ttk.Label(self.tab_stats, text="Class Histogram (raw + curved preview)", style="Pastel.TLabel",
@@ -3321,6 +3440,11 @@ class App:
             return
         qs = fetch_questions(self.grade_con)
         self.question_map = {qid: (f"{title} [{sub_id}]" if sub_id else title) for qid, title, sub_id in qs}
+        self.question_display_to_id = {
+            f"{qid} - {self.question_map[qid]}": qid
+            for qid in self.question_map.keys()
+        }
+        self.question_picker["values"] = list(self.question_display_to_id.keys())
         self.refresh_question_picker_for_student()
 
     def refresh_question_picker_for_student(self):
@@ -3329,12 +3453,76 @@ class App:
         allowed = list(self.question_map.keys())
         if not allowed:
             self.selected_question_id = None
+            self.question_pick_var.set("")
             return
         if not self.selected_question_id or self.selected_question_id not in self.question_map:
             self.selected_question_id = allowed[0]
+        for label, qid in self.question_display_to_id.items():
+            if qid == self.selected_question_id:
+                self.question_pick_var.set(label)
+                break
 
     def on_question_select(self, _evt=None):
         self.load_student_question_view()
+
+    def on_question_picker_change(self, _evt=None):
+        picked = (self.question_pick_var.get() or "").strip()
+        if not picked:
+            return
+        qid = self.question_display_to_id.get(picked)
+        if not qid:
+            return
+        self.selected_question_id = qid
+        self.load_student_question_view()
+
+    def schedule_auto_save(self):
+        if self._suspend_auto_save:
+            return
+        if self._auto_save_job is not None:
+            try:
+                self.root.after_cancel(self._auto_save_job)
+            except Exception:
+                pass
+        self._auto_save_job = self.root.after(500, self.auto_save_scores_silent)
+
+    def auto_save_scores_silent(self):
+        self._auto_save_job = None
+        if self._suspend_auto_save:
+            return
+        if not self.selected_student_id or not self.selected_question_id:
+            return
+        self.save_scores_and_rationale(show_message=False)
+
+    def fill_random_for_current_question(self):
+        if not self.require_grading_db():
+            return
+        if not self.selected_student_id or not self.selected_question_id:
+            messagebox.showinfo("Missing", "Select a student and a question first.")
+            return
+
+        min_v = simpledialog.askfloat("Random fill", "Minimum score ratio (0..1)", initialvalue=0.5, minvalue=0.0, maxvalue=1.0)
+        if min_v is None:
+            return
+        max_v = simpledialog.askfloat("Random fill", "Maximum score ratio (0..1)", initialvalue=1.0, minvalue=0.0, maxvalue=1.0)
+        if max_v is None:
+            return
+        if max_v < min_v:
+            min_v, max_v = max_v, min_v
+
+        cols = fetch_columns_for_question(self.grade_con, self.selected_question_id)
+        with self.grade_con:
+            for col_key, _group, _text, mx in cols:
+                mx = float(mx or 0.0)
+                pts = round(random.uniform(min_v * mx, max_v * mx), 2) if mx > 0 else 0.0
+                upsert_score(self.grade_con, self.selected_student_id, self.selected_question_id, col_key, pts, "Random fill", commit=False)
+
+            total = compute_total(self.grade_con, self.selected_student_id, self.selected_question_id)
+            rationale = self.rationale_text.get("1.0", tk.END).strip()
+            upsert_student_note(self.grade_con, self.selected_student_id, self.selected_question_id, rationale, overall_grade=total, commit=False)
+            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=True, commit=False)
+        self.load_student_question_view()
+        self.refresh_summary()
+        self.refresh_progress_tab()
 
     # ---- theme ----
     def save_theme(self):
@@ -3343,6 +3531,84 @@ class App:
         theme = self.theme_text.get("1.0", tk.END).strip()
         meta_set(self.grade_con, "theme", theme)
         messagebox.showinfo("Saved", "Theme saved.")
+
+
+    def reset_session_timer(self):
+        self.session_started_at = datetime.now()
+
+    def _tick_session_clock(self):
+        elapsed = datetime.now() - self.session_started_at
+        secs = int(elapsed.total_seconds())
+        hh = secs // 3600
+        mm = (secs % 3600) // 60
+        ss = secs % 60
+        fmt = f"{hh:02d}:{mm:02d}:{ss:02d}" if hh > 0 else f"{mm:02d}:{ss:02d}"
+        self.session_clock_lbl.config(text=f"Session: {fmt}")
+        if self._clock_job is not None:
+            try:
+                self.root.after_cancel(self._clock_job)
+            except Exception:
+                pass
+        self._clock_job = self.root.after(1000, self._tick_session_clock)
+
+    def _fetch_progress_rows(self):
+        if self.grade_con is None:
+            return []
+        return self.sub_con.execute("""
+          SELECT s.student_id, s.student_name,
+                 COALESCE(gp.graded,0),
+                 (SELECT COUNT(DISTINCT rs.question_id) FROM rubric_scores rs WHERE rs.student_id=s.student_id AND rs.points IS NOT NULL),
+                 (SELECT COUNT(DISTINCT sn.question_id) FROM student_notes sn WHERE sn.student_id=s.student_id AND TRIM(COALESCE(sn.rationale,''))<>''),
+                 COALESCE(gp.first_graded_at,''),
+                 COALESCE(gp.last_updated_at,''),
+                 COALESCE(gp.last_question_id,'')
+          FROM students s
+          LEFT JOIN grading_progress gp ON gp.student_id=s.student_id
+          WHERE LOWER(s.student_id) <> 'full' AND COALESCE(s.included,1)=1
+          ORDER BY s.student_id
+        """).fetchall()
+
+    def _compute_progress_counts(self):
+        rows = self._fetch_progress_rows()
+        total = len(rows)
+        assessed = 0
+        for _sid, _name, graded, scored_q, rationale_q, _fg, _lu, _lq in rows:
+            if int(graded or 0) == 1 or int(scored_q or 0) > 0 or int(rationale_q or 0) > 0:
+                assessed += 1
+        return total, assessed, max(0, total - assessed)
+
+    def refresh_progress_tab(self):
+        if not hasattr(self, "progress_tree"):
+            return
+        for item in self.progress_tree.get_children():
+            self.progress_tree.delete(item)
+
+        rows = self._fetch_progress_rows()
+        for sid, sname, graded, scored_q, rationale_q, first_g, last_u, last_q in rows:
+            self.progress_tree.insert("", "end", iid=sid, values=(
+                sid, sname, "YES" if int(graded or 0) == 1 else "NO", scored_q, rationale_q,
+                first_g or "-", last_u or "-", last_q or "-"
+            ))
+        total, assessed, left = self._compute_progress_counts()
+        self.progress_header_lbl.config(text=f"Assessed {assessed}/{total} | Left {left}")
+        self.progress_var.set(f"Progress: assessed {assessed}/{total} | left {left}")
+
+    def set_selected_student_graded(self, graded: bool):
+        if not hasattr(self, "progress_tree"):
+            return
+        sel = self.progress_tree.selection()
+        if not sel:
+            messagebox.showinfo("Select", "Select a student row in Progress tab.")
+            return
+        sid = sel[0]
+        set_student_graded_flag(self.grade_con, sid, graded)
+        self.refresh_progress_tab()
+        self.refresh_summary()
+        if self.selected_student_id == sid:
+            g, fg, lu, lq = load_grading_progress(self.grade_con, sid)
+            self.grade_meta_var.set(
+                f"Graded: {'YES' if int(g or 0)==1 else 'NO'} | First graded: {fg or '-'} | Last updated: {lu or '-'} | Last question: {lq or '-'}"
+            )
 
     # ---- students ----
     def refresh_students(self, keep_selected: bool = True):
@@ -3369,6 +3635,11 @@ class App:
             self.student_list.selection_set(idx)
             self.student_list.activate(idx)
             self.student_list.see(idx)
+        else:
+            self.selected_student_id = None
+            self.grade_meta_var.set("Graded: NO | First graded: - | Last updated: -")
+
+        self.refresh_progress_tab()
 
     def on_student_select(self, _evt=None):
         sel = self.student_list.curselection()
@@ -3382,6 +3653,10 @@ class App:
         lab = row[1] if row else ""
         lab_txt = f" | Lab:{lab}" if lab else ""
         self.student_header.config(text=f"{sid} — {name}{lab_txt}")
+        graded, first_g, last_u, last_q = load_grading_progress(self.grade_con, sid)
+        self.grade_meta_var.set(
+            f"Graded: {'YES' if int(graded or 0)==1 else 'NO'} | First graded: {first_g or '-'} | Last updated: {last_u or '-'} | Last question: {last_q or '-'}"
+        )
 
         files = get_student_files(self.sub_con, sid)
         self.file_list.delete(0, tk.END)
@@ -3475,18 +3750,23 @@ class App:
 
     # ---- load rubric table for selected student + question ----
     def load_student_question_view(self):
+        self._suspend_auto_save = True
         self.rationale_text.delete("1.0", tk.END)
         self.total_lbl.config(text="Total: -")
         self.rubric_grid.build([])
 
         if self.grade_con is None:
+            self._suspend_auto_save = False
             return
         if not self.selected_student_id:
+            self._suspend_auto_save = False
             return
         if not self.selected_question_id:
             self.refresh_question_picker_for_student()
+            self._suspend_auto_save = False
             return
         if self.selected_question_id not in self.question_map:
+            self._suspend_auto_save = False
             return
 
         cols = fetch_columns_for_question(self.grade_con, self.selected_question_id)
@@ -3501,9 +3781,10 @@ class App:
 
         total = compute_total(self.grade_con, self.selected_student_id, self.selected_question_id)
         self.total_lbl.config(text=f"Total: {total:g}")
+        self._suspend_auto_save = False
 
     # ---- save ----
-    def save_scores_and_rationale(self):
+    def save_scores_and_rationale(self, show_message: bool = True):
         if not self.require_grading_db():
             return
         if not self.selected_student_id or not self.selected_question_id:
@@ -3512,30 +3793,39 @@ class App:
 
         cols = fetch_columns_for_question(self.grade_con, self.selected_question_id)
         max_map = {k: float(mx) for (k, _g, _t, mx) in cols}
-
         score_raw, note_raw = self.rubric_grid.get_values()
 
-        for col_key, raw in score_raw.items():
-            raw = (raw or "").strip()
-            if raw == "":
-                points = None
-            else:
-                try:
-                    points = float(raw)
-                except ValueError:
-                    messagebox.showerror("Invalid score", f"Score must be numeric or blank.\nBad value for:\n{col_key}")
-                    return
-                points = clamp_points(points, max_map.get(col_key, points))
+        with self.grade_con:
+            for col_key, raw in score_raw.items():
+                raw = (raw or "").strip()
+                if raw == "":
+                    points = None
+                else:
+                    try:
+                        points = float(raw)
+                    except ValueError:
+                        messagebox.showerror("Invalid score", f"Score must be numeric or blank.\nBad value for:\n{col_key}")
+                        return
+                    points = clamp_points(points, max_map.get(col_key, points))
 
-            upsert_score(self.grade_con, self.selected_student_id, self.selected_question_id, col_key, points, note_raw.get(col_key, ""))
+                upsert_score(self.grade_con, self.selected_student_id, self.selected_question_id, col_key, points, note_raw.get(col_key, ""), commit=False)
 
-        rationale = self.rationale_text.get("1.0", tk.END).strip()
-        total = compute_total(self.grade_con, self.selected_student_id, self.selected_question_id)
-        upsert_student_note(self.grade_con, self.selected_student_id, self.selected_question_id, rationale, overall_grade=total)
+            rationale = self.rationale_text.get("1.0", tk.END).strip()
+            total = compute_total(self.grade_con, self.selected_student_id, self.selected_question_id)
+            upsert_student_note(self.grade_con, self.selected_student_id, self.selected_question_id, rationale, overall_grade=total, commit=False)
+            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=True, commit=False)
 
         self.total_lbl.config(text=f"Total: {total:g}")
         self.refresh_summary()
-        messagebox.showinfo("Saved", "Saved scores + rationale for this question.")
+        self.refresh_progress_tab()
+        if self.selected_student_id:
+            graded, first_g, last_u, last_q = load_grading_progress(self.grade_con, self.selected_student_id)
+            self.grade_meta_var.set(
+                f"Graded: {'YES' if int(graded or 0)==1 else 'NO'} | First graded: {first_g or '-'} | Last updated: {last_u or '-'} | Last question: {last_q or '-'}"
+            )
+        if show_message:
+            messagebox.showinfo("Saved", "Saved scores + rationale for this question.")
+
 
     # ---- Optional auto grade (separate component) ----
     def auto_grade_optional(self):
@@ -3561,17 +3851,20 @@ class App:
         note_map = {x["col_key"]: x.get("note", "") for x in res.get("scores", []) if "col_key" in x}
 
         max_map = {k: float(mx) for (k, _g, _t, mx) in cols}
-        for col_key in max_map.keys():
-            pts = float(score_map.get(col_key, 0.0))
-            pts = clamp_points(pts, max_map[col_key])
-            upsert_score(self.grade_con, self.selected_student_id, self.selected_question_id, col_key, pts, note_map.get(col_key, ""))
+        with self.grade_con:
+            for col_key in max_map.keys():
+                pts = float(score_map.get(col_key, 0.0))
+                pts = clamp_points(pts, max_map[col_key])
+                upsert_score(self.grade_con, self.selected_student_id, self.selected_question_id, col_key, pts, note_map.get(col_key, ""), commit=False)
 
-        rationale = (res.get("rationale") or "").strip()
-        total = compute_total(self.grade_con, self.selected_student_id, self.selected_question_id)
-        upsert_student_note(self.grade_con, self.selected_student_id, self.selected_question_id, rationale, overall_grade=total)
+            rationale = (res.get("rationale") or "").strip()
+            total = compute_total(self.grade_con, self.selected_student_id, self.selected_question_id)
+            upsert_student_note(self.grade_con, self.selected_student_id, self.selected_question_id, rationale, overall_grade=total, commit=False)
+            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=True, commit=False)
 
         self.load_student_question_view()
         self.refresh_summary()
+        self.refresh_progress_tab()
         messagebox.showinfo("Auto grade", "Draft applied and saved. Review/edit if needed.")
 
     # ---- Autofill/Test: iterate all students × assigned questions (kept; now purely a loop) ----
@@ -3701,7 +3994,9 @@ class App:
             for item in self.sum_tree.get_children():
                 self.sum_tree.delete(item)
             self.class_stats_lbl.config(text="Class: avg - | min - | max - | curve -")
+            self.summary_stats_lbl.config(text="Assessed 0/0 | Left 0")
             self.refresh_histogram()
+            self.refresh_progress_tab()
             return
 
         for item in self.sum_tree.get_children():
@@ -3740,7 +4035,11 @@ class App:
 
         stats_text = self.compute_class_stats_text()
         self.class_stats_lbl.config(text=stats_text.replace("Class Stats:", "Class:"))
+        total, assessed, left = self._compute_progress_counts()
+        self.summary_stats_lbl.config(text=f"Assessed {assessed}/{total} | Left {left}")
+        self.progress_var.set(f"Progress: assessed {assessed}/{total} | left {left}")
         self.refresh_histogram()
+        self.refresh_progress_tab()
 
     # ---- PDF Exports ----
     def export_student_pdf(self):
