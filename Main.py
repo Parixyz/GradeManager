@@ -3558,7 +3558,7 @@ class App:
     def _fetch_progress_rows(self):
         if self.grade_con is None:
             return []
-        return self.sub_con.execute("""
+        rows = self.sub_con.execute("""
           SELECT s.student_id, s.student_name,
                  COALESCE(gp.graded,0),
                  (SELECT COUNT(DISTINCT rs.question_id) FROM rubric_scores rs WHERE rs.student_id=s.student_id AND rs.points IS NOT NULL),
@@ -3571,6 +3571,7 @@ class App:
           WHERE LOWER(s.student_id) <> 'full' AND COALESCE(s.included,1)=1
           ORDER BY s.student_id
         """).fetchall()
+        return [r for r in rows if has_required_student_fields(r[0], r[1])]
 
     def _compute_progress_counts(self):
         rows = self._fetch_progress_rows()
@@ -3941,11 +3942,13 @@ class App:
         if self.grade_con is None:
             return []
         rows = self.sub_con.execute("""
-          SELECT student_id FROM students
+          SELECT student_id, student_name FROM students
           WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
         """).fetchall()
         vals = []
-        for (sid,) in rows:
+        for sid, sname in rows:
+            if not has_required_student_fields(sid, sname):
+                continue
             vals.append(compute_overall_total(self.grade_con, sid))
         return vals
 
@@ -4031,6 +4034,8 @@ class App:
 
         curve_k = float(self.curve_preview_var.get())
         for sid, sname, lab in students:
+            if not has_required_student_fields(sid, sname):
+                continue
             row = [sid, sname, lab]
             score_cache = {}
             for qid, ck, _g, _t, _m in parts:
