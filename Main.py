@@ -2804,9 +2804,13 @@ class App:
         self.question_display_to_id: dict[str, str] = {}
         self.selected_question_id: str | None = None
         self.question_pick_var = tk.StringVar(value="")
+        self._rubric_ui_map: dict[str, tuple[str, str]] = {}
+        self._rubric_max_map: dict[str, float] = {}
         self._auto_save_job = None
         self._suspend_auto_save = False
-        self.session_started_at = datetime.now()
+        self.session_started_at = None
+        self.session_elapsed_seconds = 0
+        self.session_timer_running = False
         self.grade_meta_var = tk.StringVar(value="Graded: NO | First graded: - | Last updated: -")
         self.progress_var = tk.StringVar(value="Progress: assessed 0/0 | left 0")
         self.main_menu_progress_var = tk.StringVar(value="Students assessed: 0/0 | Left: 0 | Curve preview ×1.00")
@@ -2916,7 +2920,7 @@ class App:
         self._build_progress_tab()
         self._build_regex_tab()
         self._ensure_default_regex_profile()
-        self._tick_session_clock()
+        self.reset_session_timer()
 
     def _build_grade_tab(self):
         main = ttk.Frame(self.tab_grade, style="Pastel.TFrame")
@@ -2955,7 +2959,10 @@ class App:
         timebar.grid(row=1, column=0, sticky="ew", pady=(4, 2))
         self.session_clock_lbl = ttk.Label(timebar, text="Session: 00:00", style="PastelCard.TLabel")
         self.session_clock_lbl.pack(side=tk.LEFT)
-        ttk.Button(timebar, text="Reset Timer", command=self.reset_session_timer).pack(side=tk.LEFT, padx=8)
+        ttk.Button(timebar, text="Start Timer", command=self.start_session_timer).pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Button(timebar, text="Pause Timer", command=self.pause_session_timer).pack(side=tk.LEFT, padx=4)
+        ttk.Button(timebar, text="Reset Timer", command=self.reset_session_timer).pack(side=tk.LEFT, padx=4)
+        ttk.Button(timebar, text="Mark Assessed", command=self.mark_current_student_assessed).pack(side=tk.RIGHT)
         ttk.Label(timebar, textvariable=self.progress_var, style="PastelCard.TLabel").pack(side=tk.RIGHT)
 
         self.grade_meta_lbl = ttk.Label(mid, textvariable=self.grade_meta_var, style="PastelCard.TLabel")
@@ -2991,12 +2998,8 @@ class App:
         right.rowconfigure(14, weight=1)
 
         ttk.Label(right, text="Questions: all loaded rubric questions", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
-        self.question_mode_lbl = ttk.Label(right, text="All questions visible in Summary/exports", style="PastelCard.TLabel")
+        self.question_mode_lbl = ttk.Label(right, text="Rubric below shows all questions (question picker removed)", style="PastelCard.TLabel")
         self.question_mode_lbl.grid(row=1, column=0, sticky="w", pady=(4,8))
-
-        self.question_picker = ttk.Combobox(right, textvariable=self.question_pick_var, state="readonly")
-        self.question_picker.grid(row=3, column=0, sticky="ew", pady=(0, 6))
-        self.question_picker.bind("<<ComboboxSelected>>", self.on_question_picker_change)
 
         ttk.Separator(right, orient="horizontal").grid(row=4, column=0, sticky="ew", pady=(8,10))
 
@@ -3013,10 +3016,10 @@ class App:
 
         ttk.Button(btns, text="Save Theme", command=self.save_theme).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(btns, text="Fill Random (min-max)", command=self.fill_random_for_current_question).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
-        ttk.Button(btns, text="Save (this question)", command=self.save_scores_and_rationale).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(btns, text="Save (all questions)", command=self.save_scores_and_rationale).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Export Grade (selected student)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
 
-        ttk.Label(right, text="Rationale (per student, per question)", style="PastelCard.TLabel").grid(row=8, column=0, sticky="w")
+        ttk.Label(right, text="Rationale (applied to all questions for this student)", style="PastelCard.TLabel").grid(row=8, column=0, sticky="w")
         self.rationale_text = tk.Text(right, height=6,
                                       bg="#FFFDF7", fg=self.palette["text"],
                                       insertbackground=self.palette["text"],
@@ -3025,10 +3028,10 @@ class App:
         self.rationale_text.bind("<KeyRelease>", lambda _e: self.schedule_auto_save())
         self.rationale_text.bind("<FocusOut>", lambda _e: self.schedule_auto_save())
 
-        self.total_lbl = ttk.Label(right, text="Total: -", style="PastelCard.TLabel", font=("Segoe UI", 11, "bold"))
+        self.total_lbl = ttk.Label(right, text="Overall Total: -", style="PastelCard.TLabel", font=("Segoe UI", 11, "bold"))
         self.total_lbl.grid(row=10, column=0, sticky="w", pady=(6, 6))
 
-        ttk.Label(right, text="Rubric Table (selected question)", style="PastelCard.TLabel").grid(row=11, column=0, sticky="w")
+        ttk.Label(right, text="Rubric Table (all questions)", style="PastelCard.TLabel").grid(row=11, column=0, sticky="w")
         self.rubric_grid = ScrollableRubricGrid(right)
         self.rubric_grid.set_change_callback(self.schedule_auto_save)
         self.rubric_grid.grid(row=12, column=0, sticky="nsew")
@@ -3448,7 +3451,6 @@ class App:
             f"{qid} - {self.question_map[qid]}": qid
             for qid in self.question_map.keys()
         }
-        self.question_picker["values"] = list(self.question_display_to_id.keys())
         self.refresh_question_picker_for_student()
 
     def refresh_question_picker_for_student(self):
@@ -3470,14 +3472,24 @@ class App:
         self.load_student_question_view()
 
     def on_question_picker_change(self, _evt=None):
-        picked = (self.question_pick_var.get() or "").strip()
-        if not picked:
-            return
-        qid = self.question_display_to_id.get(picked)
-        if not qid:
-            return
-        self.selected_question_id = qid
+        # Question picker removed from UI; kept for backward compatibility.
         self.load_student_question_view()
+
+    def _build_full_rubric_rows(self):
+        rows = []
+        ui_map = {}
+        max_map = {}
+        for qid, qtitle in self.question_map.items():
+            cols = fetch_columns_for_question(self.grade_con, qid)
+            group_header = f"{qid} — {qtitle}"
+            for col_key, group, text, mx in cols:
+                ui_key = f"{qid}::{col_key}"
+                label = f"[{qid}] {text}"
+                display_group = group_header if not group else f"{group_header} / {group}"
+                rows.append((ui_key, display_group, label, float(mx or 0.0)))
+                ui_map[ui_key] = (qid, col_key)
+                max_map[ui_key] = float(mx or 0.0)
+        return rows, ui_map, max_map
 
     def schedule_auto_save(self):
         if self._suspend_auto_save:
@@ -3493,15 +3505,15 @@ class App:
         self._auto_save_job = None
         if self._suspend_auto_save:
             return
-        if not self.selected_student_id or not self.selected_question_id:
+        if not self.selected_student_id:
             return
         self.save_scores_and_rationale(show_message=False)
 
     def fill_random_for_current_question(self):
         if not self.require_grading_db():
             return
-        if not self.selected_student_id or not self.selected_question_id:
-            messagebox.showinfo("Missing", "Select a student and a question first.")
+        if not self.selected_student_id:
+            messagebox.showinfo("Missing", "Select a student first.")
             return
 
         min_v = simpledialog.askfloat("Random fill", "Minimum score ratio (0..1)", initialvalue=0.5, minvalue=0.0, maxvalue=1.0)
@@ -3513,17 +3525,23 @@ class App:
         if max_v < min_v:
             min_v, max_v = max_v, min_v
 
-        cols = fetch_columns_for_question(self.grade_con, self.selected_question_id)
+        all_question_ids = list(self.question_map.keys())
+        if not all_question_ids:
+            messagebox.showinfo("Missing", "Load a rubric scheme first.")
+            return
         with self.grade_con:
-            for col_key, _group, _text, mx in cols:
-                mx = float(mx or 0.0)
-                pts = round(random.uniform(min_v * mx, max_v * mx), 2) if mx > 0 else 0.0
-                upsert_score(self.grade_con, self.selected_student_id, self.selected_question_id, col_key, pts, "Random fill", commit=False)
+            for qid in all_question_ids:
+                cols = fetch_columns_for_question(self.grade_con, qid)
+                for col_key, _group, _text, mx in cols:
+                    mx = float(mx or 0.0)
+                    pts = round(random.uniform(min_v * mx, max_v * mx), 2) if mx > 0 else 0.0
+                    upsert_score(self.grade_con, self.selected_student_id, qid, col_key, pts, "Random fill", commit=False)
 
-            total = compute_total(self.grade_con, self.selected_student_id, self.selected_question_id)
+            total = compute_total(self.grade_con, self.selected_student_id, None)
             rationale = self.rationale_text.get("1.0", tk.END).strip()
-            upsert_student_note(self.grade_con, self.selected_student_id, self.selected_question_id, rationale, overall_grade=total, commit=False)
-            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=True, commit=False)
+            for qid in all_question_ids:
+                upsert_student_note(self.grade_con, self.selected_student_id, qid, rationale, overall_grade=total, commit=False)
+            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=False, commit=False)
         self.load_student_question_view()
         self.refresh_summary()
         self.refresh_progress_tab()
@@ -3538,11 +3556,36 @@ class App:
 
 
     def reset_session_timer(self):
+        self.pause_session_timer()
+        self.session_started_at = None
+        self.session_elapsed_seconds = 0
+        self.session_clock_lbl.config(text="Session: 00:00")
+
+    def start_session_timer(self):
+        if self.session_timer_running:
+            return
         self.session_started_at = datetime.now()
+        self.session_timer_running = True
+        self._tick_session_clock()
+
+    def pause_session_timer(self):
+        if not self.session_timer_running:
+            return
+        elapsed = datetime.now() - self.session_started_at
+        self.session_elapsed_seconds += int(elapsed.total_seconds())
+        self.session_timer_running = False
+        if self._clock_job is not None:
+            try:
+                self.root.after_cancel(self._clock_job)
+            except Exception:
+                pass
+            self._clock_job = None
 
     def _tick_session_clock(self):
+        if not self.session_timer_running or self.session_started_at is None:
+            return
         elapsed = datetime.now() - self.session_started_at
-        secs = int(elapsed.total_seconds())
+        secs = self.session_elapsed_seconds + int(elapsed.total_seconds())
         hh = secs // 3600
         mm = (secs % 3600) // 60
         ss = secs % 60
@@ -3554,6 +3597,14 @@ class App:
             except Exception:
                 pass
         self._clock_job = self.root.after(1000, self._tick_session_clock)
+
+    def mark_current_student_assessed(self):
+        if not self.selected_student_id:
+            messagebox.showinfo("Missing", "Select a student first.")
+            return
+        set_student_graded_flag(self.grade_con, self.selected_student_id, True)
+        self.refresh_progress_tab()
+        self.refresh_summary()
 
     def _fetch_progress_rows(self):
         if self.grade_con is None:
@@ -3578,7 +3629,7 @@ class App:
         total = len(rows)
         assessed = 0
         for _sid, _name, graded, scored_q, rationale_q, _fg, _lu, _lq in rows:
-            if int(graded or 0) == 1 or int(scored_q or 0) > 0 or int(rationale_q or 0) > 0:
+            if int(graded or 0) == 1:
                 assessed += 1
         return total, assessed, max(0, total - assessed)
 
@@ -3760,11 +3811,11 @@ class App:
         delete_code_comments_in_range(self.grade_con, self.selected_student_id, self.selected_file_path, sidx, eidx)
         self._apply_comments_highlights()
 
-    # ---- load rubric table for selected student + question ----
+    # ---- load rubric table for selected student (all questions) ----
     def load_student_question_view(self):
         self._suspend_auto_save = True
         self.rationale_text.delete("1.0", tk.END)
-        self.total_lbl.config(text="Total: -")
+        self.total_lbl.config(text="Overall Total: -")
         self.rubric_grid.build([])
 
         if self.grade_con is None:
@@ -3773,42 +3824,47 @@ class App:
         if not self.selected_student_id:
             self._suspend_auto_save = False
             return
-        if not self.selected_question_id:
-            self.refresh_question_picker_for_student()
-            self._suspend_auto_save = False
-            return
-        if self.selected_question_id not in self.question_map:
-            self._suspend_auto_save = False
-            return
 
-        cols = fetch_columns_for_question(self.grade_con, self.selected_question_id)
-        self.rubric_grid.build(cols)
+        rows, self._rubric_ui_map, self._rubric_max_map = self._build_full_rubric_rows()
+        self.rubric_grid.build(rows)
 
-        score_map, note_map = load_student_scores(self.grade_con, self.selected_student_id, self.selected_question_id)
-        self.rubric_grid.set_values(score_map, note_map)
+        combined_scores = {}
+        combined_notes = {}
+        rationale_blocks = []
+        for qid in self.question_map.keys():
+            score_map, note_map = load_student_scores(self.grade_con, self.selected_student_id, qid)
+            for ui_key, (qid2, col_key) in self._rubric_ui_map.items():
+                if qid2 == qid:
+                    combined_scores[ui_key] = score_map.get(col_key)
+                    combined_notes[ui_key] = note_map.get(col_key, "")
 
-        note_row = load_student_note(self.grade_con, self.selected_student_id, self.selected_question_id)
-        if note_row and note_row[0]:
-            self.rationale_text.insert("1.0", note_row[0])
+            note_row = load_student_note(self.grade_con, self.selected_student_id, qid)
+            if note_row and (note_row[0] or "").strip():
+                rationale_blocks.append(f"[{qid}]\n{note_row[0].strip()}")
 
-        total = compute_total(self.grade_con, self.selected_student_id, self.selected_question_id)
-        self.total_lbl.config(text=f"Total: {total:g}")
+        self.rubric_grid.set_values(combined_scores, combined_notes)
+        if rationale_blocks:
+            self.rationale_text.insert("1.0", "\n\n".join(rationale_blocks))
+
+        total = compute_total(self.grade_con, self.selected_student_id, None)
+        self.total_lbl.config(text=f"Overall Total: {total:g}")
         self._suspend_auto_save = False
 
     # ---- save ----
     def save_scores_and_rationale(self, show_message: bool = True):
         if not self.require_grading_db():
             return
-        if not self.selected_student_id or not self.selected_question_id:
-            messagebox.showinfo("Missing", "Select a student and a question first.")
+        if not self.selected_student_id:
+            messagebox.showinfo("Missing", "Select a student first.")
+            return
+        if not self._rubric_ui_map:
+            messagebox.showinfo("Missing", "Load a rubric scheme first.")
             return
 
-        cols = fetch_columns_for_question(self.grade_con, self.selected_question_id)
-        max_map = {k: float(mx) for (k, _g, _t, mx) in cols}
         score_raw, note_raw = self.rubric_grid.get_values()
 
         with self.grade_con:
-            for col_key, raw in score_raw.items():
+            for ui_key, raw in score_raw.items():
                 raw = (raw or "").strip()
                 if raw == "":
                     points = None
@@ -3816,18 +3872,20 @@ class App:
                     try:
                         points = float(raw)
                     except ValueError:
-                        messagebox.showerror("Invalid score", f"Score must be numeric or blank.\nBad value for:\n{col_key}")
+                        messagebox.showerror("Invalid score", f"Score must be numeric or blank.\nBad value for:\n{ui_key}")
                         return
-                    points = clamp_points(points, max_map.get(col_key, points))
+                    points = clamp_points(points, self._rubric_max_map.get(ui_key, points))
 
-                upsert_score(self.grade_con, self.selected_student_id, self.selected_question_id, col_key, points, note_raw.get(col_key, ""), commit=False)
+                qid, col_key = self._rubric_ui_map[ui_key]
+                upsert_score(self.grade_con, self.selected_student_id, qid, col_key, points, note_raw.get(ui_key, ""), commit=False)
 
             rationale = self.rationale_text.get("1.0", tk.END).strip()
-            total = compute_total(self.grade_con, self.selected_student_id, self.selected_question_id)
-            upsert_student_note(self.grade_con, self.selected_student_id, self.selected_question_id, rationale, overall_grade=total, commit=False)
-            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=True, commit=False)
+            total = compute_total(self.grade_con, self.selected_student_id, None)
+            for qid in self.question_map.keys():
+                upsert_student_note(self.grade_con, self.selected_student_id, qid, rationale, overall_grade=total, commit=False)
+            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=False, commit=False)
 
-        self.total_lbl.config(text=f"Total: {total:g}")
+        self.total_lbl.config(text=f"Overall Total: {total:g}")
         self.refresh_summary()
         self.refresh_progress_tab()
         if self.selected_student_id:
@@ -3836,7 +3894,7 @@ class App:
                 f"Graded: {'YES' if int(graded or 0)==1 else 'NO'} | First graded: {first_g or '-'} | Last updated: {last_u or '-'} | Last question: {last_q or '-'}"
             )
         if show_message:
-            messagebox.showinfo("Saved", "Saved scores + rationale for this question.")
+            messagebox.showinfo("Saved", "Saved scores + rationale for all rubric questions.")
 
 
     # ---- Optional auto grade (separate component) ----
@@ -3872,7 +3930,7 @@ class App:
             rationale = (res.get("rationale") or "").strip()
             total = compute_total(self.grade_con, self.selected_student_id, self.selected_question_id)
             upsert_student_note(self.grade_con, self.selected_student_id, self.selected_question_id, rationale, overall_grade=total, commit=False)
-            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=True, commit=False)
+            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=False, commit=False)
 
         self.load_student_question_view()
         self.refresh_summary()
