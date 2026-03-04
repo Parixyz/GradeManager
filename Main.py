@@ -236,10 +236,23 @@ def try_extract_from_folder_name(folder: Path, id_regex: str, name_regex: str):
 
     return fid, fname
 
+
+def _compile_optional_regex(pattern: str, ignore_case: bool = False):
+    raw = (pattern or "").strip()
+    if not raw:
+        return None
+    flags = re.IGNORECASE if ignore_case else 0
+    try:
+        return re.compile(raw, flags)
+    except Exception:
+        return None
+
 def infer_student_for_folder(
     folder: Path,
     file_globs: list[str],
     include_filename_regex: str,
+    exclude_filename_regex: str,
+    filename_regex_ignore_case: bool,
     folder_id_regex: str,
     folder_name_regex: str,
 ):
@@ -257,13 +270,12 @@ def infer_student_for_folder(
         files.extend(list(folder.rglob(g)))
 
     # Optional filename regex filter
-    if include_filename_regex:
-        try:
-            rr = re.compile(include_filename_regex)
-            files = [p for p in files if rr.search(p.name)]
-        except Exception:
-            # if regex broken, ignore filter
-            pass
+    include_re = _compile_optional_regex(include_filename_regex, ignore_case=filename_regex_ignore_case)
+    exclude_re = _compile_optional_regex(exclude_filename_regex, ignore_case=filename_regex_ignore_case)
+    if include_re:
+        files = [p for p in files if include_re.search(p.name)]
+    if exclude_re:
+        files = [p for p in files if not exclude_re.search(p.name)]
 
     # Prefer .java content for header scan, but allow other files for listing
     java_like = [p for p in files if p.suffix.lower() == ".java"]
@@ -346,10 +358,13 @@ class FolderScannerBase:
     Base scanner so folder scanning can be customized via inheritance later.
     """
     def __init__(self, root_folder: Path, file_globs: list[str], include_filename_regex: str,
+                 exclude_filename_regex: str, filename_regex_ignore_case: bool,
                  folder_id_regex: str, folder_name_regex: str):
         self.root_folder = root_folder
         self.file_globs = file_globs or ["*.java"]
         self.include_filename_regex = include_filename_regex
+        self.exclude_filename_regex = exclude_filename_regex
+        self.filename_regex_ignore_case = filename_regex_ignore_case
         self.folder_id_regex = folder_id_regex
         self.folder_name_regex = folder_name_regex
 
@@ -379,6 +394,8 @@ class FolderScannerBase:
             folder,
             file_globs=self.file_globs,
             include_filename_regex=self.include_filename_regex,
+            exclude_filename_regex=self.exclude_filename_regex,
+            filename_regex_ignore_case=self.filename_regex_ignore_case,
             folder_id_regex=self.folder_id_regex,
             folder_name_regex=self.folder_name_regex,
         )
@@ -1744,11 +1761,15 @@ class ScanWindow(tk.Toplevel):
         # Flex settings
         self.file_globs_var = tk.StringVar(value="*.java")
         self.filename_regex_var = tk.StringVar(value="")  # optional
+        self.exclude_filename_regex_var = tk.StringVar(value="")
+        self.filename_regex_ignore_case_var = tk.BooleanVar(value=True)
         self.folder_id_regex_var = tk.StringVar(value="")
         self.folder_name_regex_var = tk.StringVar(value="")
         self.only_new_files_var = tk.BooleanVar(value=False)
         self.global_lab_id_var = tk.StringVar(value="")
         self.find_var = tk.StringVar(value="")
+        self.find_regex_var = tk.BooleanVar(value=False)
+        self.find_case_sensitive_var = tk.BooleanVar(value=False)
         self._find_from = "1.0"
 
         self.rows: dict[str, dict] = {}
@@ -1778,7 +1799,8 @@ class ScanWindow(tk.Toplevel):
         actions.pack(fill=tk.X)
 
         ttk.Button(actions, text="Choose ROOT Folder", command=self.choose_root).pack(side=tk.LEFT)
-        ttk.Button(actions, text="Scan / Rescan", command=self.scan).pack(side=tk.LEFT, padx=8)
+        ttk.Button(actions, text="Scan / Rescan All", command=self.scan).pack(side=tk.LEFT, padx=8)
+        ttk.Button(actions, text="Rescan Selected Folder", command=self.rescan_selected_folder).pack(side=tk.LEFT)
 
         ttk.Button(actions, text="Commit", command=self.commit_current_scan).pack(side=tk.RIGHT)
         ttk.Button(actions, text="Save Scan to DB", command=self.save_to_db).pack(side=tk.RIGHT, padx=(0, 8))
@@ -1794,10 +1816,13 @@ class ScanWindow(tk.Toplevel):
         opts_nb.add(filters_tab, text="Scan Filters")
         opts_nb.add(skim_tab, text="Skimming")
 
-        ttk.Label(filters_tab, text="File globs (comma-separated)", style="Pastel.TLabel").pack(side=tk.LEFT)
+        ttk.Label(filters_tab, text="File globs (comma/space/newline)", style="Pastel.TLabel").pack(side=tk.LEFT)
         ttk.Entry(filters_tab, textvariable=self.file_globs_var, width=30).pack(side=tk.LEFT, padx=(6, 12))
-        ttk.Label(filters_tab, text="Filename include-regex (optional)", style="Pastel.TLabel").pack(side=tk.LEFT)
-        ttk.Entry(filters_tab, textvariable=self.filename_regex_var, width=34).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(filters_tab, text="Filename include-regex", style="Pastel.TLabel").pack(side=tk.LEFT)
+        ttk.Entry(filters_tab, textvariable=self.filename_regex_var, width=24).pack(side=tk.LEFT, padx=(6, 6))
+        ttk.Label(filters_tab, text="Exclude-regex", style="Pastel.TLabel").pack(side=tk.LEFT)
+        ttk.Entry(filters_tab, textvariable=self.exclude_filename_regex_var, width=20).pack(side=tk.LEFT, padx=(6, 6))
+        ttk.Checkbutton(filters_tab, text="Ignore case", variable=self.filename_regex_ignore_case_var).pack(side=tk.LEFT)
         ttk.Checkbutton(filters_tab, text="Only show files not already registered", variable=self.only_new_files_var).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Label(filters_tab, text="Regex profile:", style="Pastel.TLabel").pack(side=tk.LEFT, padx=(12, 4))
         ttk.Label(filters_tab, textvariable=self.app.active_regex_profile_var, style="Pastel.TLabel").pack(side=tk.LEFT)
@@ -1878,7 +1903,7 @@ class ScanWindow(tk.Toplevel):
 
         right = ttk.Frame(main, style="Pastel.TFrame")
         right.grid(row=0, column=2, sticky="nsew")
-        right.rowconfigure(2, weight=1)
+        right.rowconfigure(3, weight=1)
         right.columnconfigure(0, weight=1)
 
         ttk.Label(right, text="Files in Selected Folder", style="Pastel.TLabel").grid(row=0, column=0, sticky="w")
@@ -1905,10 +1930,12 @@ class ScanWindow(tk.Toplevel):
         self.preview.tag_configure("find_hit", background="#ffe082")
 
         find_row = ttk.Frame(right, style="Pastel.TFrame")
-        find_row.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        find_row.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(find_row, text="Find in file", style="Pastel.TLabel").pack(side=tk.LEFT)
         self.find_entry = ttk.Entry(find_row, textvariable=self.find_var, width=26)
         self.find_entry.pack(side=tk.LEFT, padx=(6, 6))
+        ttk.Checkbutton(find_row, text="Regex", variable=self.find_regex_var).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Checkbutton(find_row, text="Case sensitive", variable=self.find_case_sensitive_var).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(find_row, text="Find Next", command=self.find_next).pack(side=tk.LEFT)
 
         self.preview.bind("<KeyPress-i>", self._hotkey_use_id)
@@ -1953,7 +1980,7 @@ class ScanWindow(tk.Toplevel):
         raw = (self.file_globs_var.get() or "").strip()
         if not raw:
             return ["*.java"]
-        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        parts = [p.strip() for p in re.split(r"[\s,;]+", raw) if p.strip()]
         return parts if parts else ["*.java"]
 
     def _scan_counts(self) -> dict:
@@ -2009,6 +2036,8 @@ class ScanWindow(tk.Toplevel):
     def reset_regex_defaults(self):
         self.file_globs_var.set("*.java")
         self.filename_regex_var.set("")
+        self.exclude_filename_regex_var.set("")
+        self.filename_regex_ignore_case_var.set(True)
         self.folder_id_regex_var.set("")
         self.folder_name_regex_var.set("")
 
@@ -2043,6 +2072,8 @@ class ScanWindow(tk.Toplevel):
         return {
             "file_globs": (self.file_globs_var.get() or "").strip() or "*.java",
             "filename_regex": (self.filename_regex_var.get() or "").strip(),
+            "exclude_filename_regex": (self.exclude_filename_regex_var.get() or "").strip(),
+            "filename_regex_ignore_case": bool(self.filename_regex_ignore_case_var.get()),
             "folder_id_regex": (self.folder_id_regex_var.get() or "").strip(),
             "folder_name_regex": (self.folder_name_regex_var.get() or "").strip(),
             "only_new_files": bool(self.only_new_files_var.get()),
@@ -2051,6 +2082,8 @@ class ScanWindow(tk.Toplevel):
     def apply_profile_settings(self, payload: dict):
         self.file_globs_var.set((payload.get("file_globs") or "*.java").strip() or "*.java")
         self.filename_regex_var.set((payload.get("filename_regex") or "").strip())
+        self.exclude_filename_regex_var.set((payload.get("exclude_filename_regex") or "").strip())
+        self.filename_regex_ignore_case_var.set(bool(payload.get("filename_regex_ignore_case", True)))
         self.folder_id_regex_var.set((payload.get("folder_id_regex") or "").strip())
         self.folder_name_regex_var.set((payload.get("folder_name_regex") or "").strip())
         self.only_new_files_var.set(bool(payload.get("only_new_files", False)))
@@ -2096,6 +2129,8 @@ class ScanWindow(tk.Toplevel):
 
         self.file_globs_var.set((payload.get("file_globs") or "*.java").strip() or "*.java")
         self.filename_regex_var.set((payload.get("filename_regex") or "").strip())
+        self.exclude_filename_regex_var.set((payload.get("exclude_filename_regex") or "").strip())
+        self.filename_regex_ignore_case_var.set(bool(payload.get("filename_regex_ignore_case", True)))
         self.folder_id_regex_var.set((payload.get("folder_id_regex") or "").strip())
         self.folder_name_regex_var.set((payload.get("folder_name_regex") or "").strip())
         self.only_new_files_var.set(bool(payload.get("only_new_files", False)))
@@ -2249,6 +2284,8 @@ class ScanWindow(tk.Toplevel):
 
         file_globs = self._parse_globs()
         filename_regex = (self.filename_regex_var.get() or "").strip()
+        exclude_filename_regex = (self.exclude_filename_regex_var.get() or "").strip()
+        filename_regex_ignore_case = bool(self.filename_regex_ignore_case_var.get())
         folder_id_regex = (self.folder_id_regex_var.get() or "").strip()
         folder_name_regex = (self.folder_name_regex_var.get() or "").strip()
 
@@ -2256,6 +2293,8 @@ class ScanWindow(tk.Toplevel):
             self.root_folder,
             file_globs=file_globs,
             include_filename_regex=filename_regex,
+            exclude_filename_regex=exclude_filename_regex,
+            filename_regex_ignore_case=filename_regex_ignore_case,
             folder_id_regex=folder_id_regex,
             folder_name_regex=folder_name_regex,
         )
@@ -2335,6 +2374,58 @@ class ScanWindow(tk.Toplevel):
         self._reload_tree_rows()
 
         self._set_scan_status(prefix="Scan done")
+
+    def rescan_selected_folder(self):
+        folder_key = self._selected_folder_from_tree()
+        if not folder_key:
+            messagebox.showinfo("Rescan", "Select a folder row first.")
+            return
+        row = self.rows.get(folder_key)
+        if not row:
+            return
+
+        file_globs = self._parse_globs()
+        filename_regex = (self.filename_regex_var.get() or "").strip()
+        exclude_filename_regex = (self.exclude_filename_regex_var.get() or "").strip()
+        filename_regex_ignore_case = bool(self.filename_regex_ignore_case_var.get())
+        folder_id_regex = (self.folder_id_regex_var.get() or "").strip()
+        folder_name_regex = (self.folder_name_regex_var.get() or "").strip()
+
+        scanner = DefaultFolderScanner(
+            Path(folder_key),
+            file_globs=file_globs,
+            include_filename_regex=filename_regex,
+            exclude_filename_regex=exclude_filename_regex,
+            filename_regex_ignore_case=filename_regex_ignore_case,
+            folder_id_regex=folder_id_regex,
+            folder_name_regex=folder_name_regex,
+        )
+        final_id, final_name, det_id, det_name, files = scanner.detect_folder(Path(folder_key))
+        if self.only_new_files_var.get():
+            existing_files = {r[0] for r in self.con.execute("SELECT file_path FROM files").fetchall()}
+            files = [fp for fp in files if fp not in existing_files]
+
+        row["files"] = files
+        row["det_id"] = det_id or ""
+        row["det_name"] = det_name or ""
+        if not (row.get("final_id") or "").strip():
+            row["final_id"] = final_id or ""
+        if not (row.get("final_name") or "").strip():
+            row["final_name"] = self._normalized_name(final_name or "", folder_key, det_name or "")
+
+        is_student = has_required_student_fields(row.get("final_id", ""), row.get("final_name", ""))
+        manual = row.get("manual_include_override")
+        if not (is_student and files):
+            row["include"] = False
+        elif manual is False:
+            row["include"] = False
+        else:
+            row["include"] = True
+
+        self._refresh_tree_row(folder_key)
+        self.on_folder_select()
+        self._reload_student_rows()
+        self._set_scan_status(prefix="Rescanned selected folder")
 
     def on_folder_select(self, _evt=None):
         sel = self.tree.selection()
@@ -2522,13 +2613,38 @@ class ScanWindow(tk.Toplevel):
         if not query:
             return
 
-        start = self.preview.search(query, self._find_from, stopindex=tk.END, nocase=True)
-        if not start:
-            start = self.preview.search(query, "1.0", stopindex=tk.END, nocase=True)
-            if not start:
-                return
+        content = self.preview.get("1.0", tk.END)
+        start_offset = 0
+        if self._find_from and "." in self._find_from:
+            try:
+                start_offset = int(self.preview.count("1.0", self._find_from, "chars")[0])
+            except Exception:
+                start_offset = 0
 
-        end = f"{start}+{len(query)}c"
+        flags = 0 if self.find_case_sensitive_var.get() else re.IGNORECASE
+
+        if self.find_regex_var.get():
+            try:
+                pattern = re.compile(query, flags)
+            except re.error as e:
+                messagebox.showerror("Invalid regex", str(e))
+                return
+            match = pattern.search(content, pos=start_offset) or pattern.search(content, pos=0)
+            if not match:
+                return
+            sidx, eidx = match.span()
+            if eidx <= sidx:
+                eidx = sidx + 1
+            start = f"1.0+{sidx}c"
+            end = f"1.0+{eidx}c"
+        else:
+            start = self.preview.search(query, self._find_from, stopindex=tk.END, nocase=not self.find_case_sensitive_var.get())
+            if not start:
+                start = self.preview.search(query, "1.0", stopindex=tk.END, nocase=not self.find_case_sensitive_var.get())
+                if not start:
+                    return
+            end = f"{start}+{len(query)}c"
+
         self.preview.tag_add("find_hit", start, end)
         self.preview.mark_set(tk.INSERT, end)
         self.preview.see(start)
@@ -3137,6 +3253,8 @@ class App:
         return {
             "file_globs": "*.java",
             "filename_regex": "",
+            "exclude_filename_regex": "",
+            "filename_regex_ignore_case": True,
             "folder_id_regex": "",
             "folder_name_regex": "",
             "only_new_files": False,
@@ -3182,6 +3300,8 @@ class App:
             "folder_id_regex": tk.StringVar(value=""),
             "folder_name_regex": tk.StringVar(value=""),
             "filename_regex": tk.StringVar(value=""),
+            "exclude_filename_regex": tk.StringVar(value=""),
+            "filename_regex_ignore_case": tk.StringVar(value="1"),
             "file_globs": tk.StringVar(value="*.java"),
         }
         fields = [
@@ -3190,7 +3310,9 @@ class App:
             ("Optional folder ID regex", "folder_id_regex"),
             ("Optional folder name regex", "folder_name_regex"),
             ("Filename include regex", "filename_regex"),
-            ("Filename glob patterns (comma separated)", "file_globs"),
+            ("Filename exclude regex", "exclude_filename_regex"),
+            ("Filename regex ignore case (1/0)", "filename_regex_ignore_case"),
+            ("Filename glob patterns (comma/space/newline)", "file_globs"),
         ]
         for i, (label, key) in enumerate(fields):
             ttk.Label(form, text=label, style="Pastel.TLabel").grid(row=i, column=0, sticky="w", pady=4)
@@ -3204,6 +3326,8 @@ class App:
             "folder_id_regex": self.regex_vars["folder_id_regex"].get().strip(),
             "folder_name_regex": self.regex_vars["folder_name_regex"].get().strip(),
             "filename_regex": self.regex_vars["filename_regex"].get().strip(),
+            "exclude_filename_regex": self.regex_vars["exclude_filename_regex"].get().strip(),
+            "filename_regex_ignore_case": self.regex_vars["filename_regex_ignore_case"].get().strip() != "0",
             "file_globs": self.regex_vars["file_globs"].get().strip() or "*.java",
             "only_new_files": False,
         }
@@ -3211,7 +3335,10 @@ class App:
     def load_regex_profile_into_editor(self, profile_name: str):
         payload = load_regex_profile(self.sub_con, profile_name) or self._default_regex_payload()
         for k, v in self.regex_vars.items():
-            v.set(str(payload.get(k, "")))
+            if k == "filename_regex_ignore_case":
+                v.set("1" if bool(payload.get(k, True)) else "0")
+            else:
+                v.set(str(payload.get(k, "")))
         self.regex_profile_pick_var.set(profile_name)
 
     def save_regex_profile(self):
