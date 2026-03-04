@@ -2809,6 +2809,7 @@ class App:
         self.session_started_at = datetime.now()
         self.grade_meta_var = tk.StringVar(value="Graded: NO | First graded: - | Last updated: -")
         self.progress_var = tk.StringVar(value="Progress: assessed 0/0 | left 0")
+        self.main_menu_progress_var = tk.StringVar(value="Students assessed: 0/0 | Left: 0 | Curve preview ×1.00")
         self._clock_job = None
 
         # curve preview factor (histogram overlay)
@@ -2884,6 +2885,9 @@ class App:
 
         self.class_stats_lbl = ttk.Label(stats_frame, text="Class: avg - | min - | max - | curve -", style="Pastel.TLabel")
         self.class_stats_lbl.pack(side=tk.TOP, anchor="e")
+
+        self.main_menu_progress_lbl = ttk.Label(stats_frame, textvariable=self.main_menu_progress_var, style="Pastel.TLabel")
+        self.main_menu_progress_lbl.pack(side=tk.TOP, anchor="e", pady=(2, 0))
 
         curve_row = ttk.Frame(stats_frame, style="Pastel.TFrame")
         curve_row.pack(side=tk.TOP, anchor="e", pady=(2, 0))
@@ -3577,6 +3581,13 @@ class App:
                 assessed += 1
         return total, assessed, max(0, total - assessed)
 
+    def _update_student_progress_labels(self, total: int, assessed: int, left: int):
+        self.progress_var.set(f"Progress: assessed {assessed}/{total} | left {left}")
+        curve_k = float(self.curve_preview_var.get())
+        self.main_menu_progress_var.set(
+            f"Students assessed: {assessed}/{total} | Left: {left} | Curve preview ×{curve_k:.2f}"
+        )
+
     def refresh_progress_tab(self):
         if not hasattr(self, "progress_tree"):
             return
@@ -3591,7 +3602,7 @@ class App:
             ))
         total, assessed, left = self._compute_progress_counts()
         self.progress_header_lbl.config(text=f"Assessed {assessed}/{total} | Left {left}")
-        self.progress_var.set(f"Progress: assessed {assessed}/{total} | left {left}")
+        self._update_student_progress_labels(total, assessed, left)
 
     def set_selected_student_graded(self, graded: bool):
         if not hasattr(self, "progress_tree"):
@@ -3995,6 +4006,7 @@ class App:
                 self.sum_tree.delete(item)
             self.class_stats_lbl.config(text="Class: avg - | min - | max - | curve -")
             self.summary_stats_lbl.config(text="Assessed 0/0 | Left 0")
+            self._update_student_progress_labels(0, 0, 0)
             self.refresh_histogram()
             self.refresh_progress_tab()
             return
@@ -4037,7 +4049,7 @@ class App:
         self.class_stats_lbl.config(text=stats_text.replace("Class Stats:", "Class:"))
         total, assessed, left = self._compute_progress_counts()
         self.summary_stats_lbl.config(text=f"Assessed {assessed}/{total} | Left {left}")
-        self.progress_var.set(f"Progress: assessed {assessed}/{total} | left {left}")
+        self._update_student_progress_labels(total, assessed, left)
         self.refresh_histogram()
         self.refresh_progress_tab()
 
