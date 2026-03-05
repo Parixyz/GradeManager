@@ -93,6 +93,7 @@ class GPT_test:
                 + (extra_prompt or "")
                 + f"\nLeniency level: {float(leniency_level or 0.0):.2f} (-1 strict, +1 lenient)."
                 + "\nUse the exact question context and rubric min/max ranges."
+                + "\nFor line comments/highlights: include only mistakes, bugs, or missing requirements. Do not add praise-only comments."
             ),
             "rubric_items": [{**ri, "min_points": float(ri.get("min_points", 0.0) or 0.0), "max_points": float(ri.get("max_points", 0.0) or 0.0)} for ri in (rubric_items or [])],
             "code": code_text,
