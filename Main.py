@@ -1023,6 +1023,22 @@ def _line_highlight_range(start_index: str, end_index: str) -> tuple[str, str]:
     e_line = max(s_line, int(end[0]))
     return f"{s_line}.0", f"{e_line}.end"
 
+
+def _format_comment_range_label(start_index: str, end_index: str) -> str:
+    """
+    Human-readable range label that clarifies line bounds and end-of-line selections.
+    Tk Text end indices are exclusive, so line+1.0 is presented as previous line end.
+    """
+    start, end = _normalize_index_range(start_index, end_index)
+    s_line, s_col = start
+    e_line, e_col = end
+
+    # Tk selections are end-exclusive. A boundary at col 0 usually means
+    # the previous line's end should be highlighted.
+    if e_col == 0 and e_line > s_line:
+        return f"Line {s_line}:{s_col} to line {e_line - 1}:end"
+    return f"Line {s_line}:{s_col} to line {e_line}:{e_col}"
+
 def _normalize_index_range(start_index: str, end_index: str) -> tuple[tuple[int, int], tuple[int, int]]:
     start = _parse_tk_index_value(start_index)
     end = _parse_tk_index_value(end_index)
@@ -1213,7 +1229,7 @@ def export_all_to_excel(
     ws_comments.append(["Student ID", "Student Name", "Code (file)", "Highlighted part", "Comment"])
     for sid, sname, _lab in assessed_students:
         for fp, sidx, eidx, txt, _color, _ts in fetch_code_comments_for_student(grade_con, sid):
-            ws_comments.append([sid, sname, Path(fp).name, f"{sidx}–{eidx}", txt or ""])
+            ws_comments.append([sid, sname, Path(fp).name, _format_comment_range_label(sidx, eidx), txt or ""])
 
     # Reference model row if FULL exists
     full_row = next((r for r in students if is_full_student(r[0])), None)
@@ -1577,7 +1593,7 @@ class PDFExporter:
                     esc_comment = (txt or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                     td.append([
                         Paragraph(esc_file, cell_style),
-                        Paragraph(f"{sidx}–{eidx}", cell_style),
+                        Paragraph(_format_comment_range_label(sidx, eidx), cell_style),
                         Preformatted(code_block, code_cell_style),
                         Paragraph(esc_comment[:280], cell_style),
                     ])
@@ -3223,7 +3239,7 @@ class App:
         self.nb.add(self.tab_stats, text="Stats")
         self.nb.add(self.tab_progress, text="Progress")
         self.nb.add(self.tab_regex, text="Regex / Patterns")
-        self.nb.add(self.tab_ai_trace, text="AI Prompt + Chat")
+        self.nb.add(self.tab_ai_trace, text="Prompt + Chat")
         self.nb.add(self.tab_settings, text="Settings")
         self.nb.add(self.tab_pdf_menu, text="PDF Menu")
         self.nb.add(self.tab_db, text="DB Browser")
@@ -3332,8 +3348,8 @@ class App:
 
         ttk.Button(btns, text="Save Theme", command=lambda: self.save_theme(source="grade")).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(btns, text="AutoFill", command=self.auto_fill_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
-        ttk.Button(btns, text="Auto-Grade Files", command=self.auto_grade_files_for_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
-        ttk.Button(btns, text="Auto-Grade All", command=self.auto_grade_all_students).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(btns, text="Grade Files", command=self.auto_grade_files_for_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(btns, text="Grade All", command=self.auto_grade_all_students).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Clear Grade", command=self.clear_selected_student_grade).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Save (all questions)", command=self.save_scores_and_rationale).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Mark Reviewed", command=self.mark_selected_student_reviewed).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
@@ -3402,7 +3418,7 @@ class App:
         top.grid(row=0, column=0, sticky="ew")
         ttk.Label(top, text="Prompt process + model output + chat", style="Pastel.TLabel", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
         ttk.Label(top, textvariable=self.chat_student_var, style="Pastel.TLabel").pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(top, text="Refresh from last auto-grade", command=self.refresh_prompt_trace_tab).pack(side=tk.LEFT, padx=8)
+        ttk.Button(top, text="Refresh latest grading trace", command=self.refresh_prompt_trace_tab).pack(side=tk.LEFT, padx=8)
 
         panes = ttk.Panedwindow(self.tab_ai_trace, orient=tk.HORIZONTAL)
         panes.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
@@ -3501,13 +3517,13 @@ class App:
     def _format_last_prompt_process(self):
         data = self.last_auto_grade_trace.get("prompt")
         if not data:
-            return "No prompt process captured yet. Run Auto-Grade Files first."
+            return "No prompt process captured yet. Run Grade Files first."
         return data
 
     def _format_last_result(self):
         data = self.last_auto_grade_trace.get("result")
         if not data:
-            return "No auto-grade output captured yet."
+            return "No grading output captured yet."
         return data
 
     def refresh_prompt_trace_tab(self):
@@ -3672,7 +3688,7 @@ class App:
         auto_box.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
         auto_box.columnconfigure(0, weight=1)
         auto_box.rowconfigure(1, weight=1)
-        ttk.Label(auto_box, text="Auto-Grade preflight settings", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(auto_box, text="Grading preflight settings", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
         self.theme_settings_text = tk.Text(auto_box, height=5, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
         self.theme_settings_text.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         self.theme_settings_text.insert("1.0", DEFAULT_THEME)
@@ -4154,7 +4170,7 @@ class App:
         box.pack(fill=tk.BOTH, expand=True)
         box.columnconfigure(1, weight=1)
 
-        ttk.Label(box, text="GPT Auto-Grader Settings", style="PastelCard.TLabel", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(box, text="GPT Grading Settings", style="PastelCard.TLabel", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(box, text="Enable API key for Auto Grade + Chat", style="PastelCard.TLabel").grid(row=1, column=0, sticky="w", pady=(10, 4))
         ttk.Checkbutton(box, variable=self.gpt_remote_enabled_var, text="Use online model", style="PastelCard.TCheckbutton").grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(10, 4))
 
@@ -4695,7 +4711,7 @@ class App:
         self.load_student_question_view()
         self.refresh_summary()
         self.refresh_progress_tab()
-        messagebox.showinfo("Auto-Grade Files", "Draft grading complete for this student. Please review.")
+        messagebox.showinfo("Grade Files", "Draft grading complete for this student. Please review.")
 
     def auto_grade_all_students(self):
         if not self.require_grading_db():
@@ -4723,9 +4739,9 @@ class App:
         self.refresh_summary()
         self.refresh_progress_tab()
         if failed:
-            messagebox.showwarning("Auto-Grade All", "Completed with some errors\n" + "\n".join(failed[:8]))
+            messagebox.showwarning("Grade All", "Completed with some errors\n" + "\n".join(failed[:8]))
         else:
-            messagebox.showinfo("Auto-Grade All", f"Draft grading complete for {len(student_ids)} students. Please review.")
+            messagebox.showinfo("Grade All", f"Draft grading complete for {len(student_ids)} students. Please review.")
 
     # ---- theme ----
     def save_theme(self, source: str = "auto"):
@@ -5004,11 +5020,10 @@ class App:
                 except Exception:
                     pass
             try:
-                line_start, line_end = _line_highlight_range(sidx, eidx)
-                self.preview.tag_add(tag, line_start, line_end)
+                self.preview.tag_add(tag, sidx, eidx)
             except Exception:
                 pass
-            self.comment_list.insert(tk.END, f"#{cid} {line_start}–{line_end}: {text}")
+            self.comment_list.insert(tk.END, f"#{cid} {_format_comment_range_label(sidx, eidx)}: {text}")
 
     def add_comment_to_selection(self):
         if not self.require_grading_db():
