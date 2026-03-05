@@ -2936,7 +2936,7 @@ class App:
         self.session_timer_running = False
         self.grade_meta_var = tk.StringVar(value="Graded: NO | Reviewed: YES | First graded: - | Last updated: -")
         self.progress_var = tk.StringVar(value="Progress: assessed 0/0 | left 0")
-        self.main_menu_progress_var = tk.StringVar(value="Students assessed: 0/0 | Left: 0 | Unreviewed auto: 0 | Curve preview ×1.00")
+        self.main_menu_progress_var = tk.StringVar(value="Students assessed: 0/0 | Left: 0 | Unreviewed: 0 | Curve preview ×1.00")
         self._clock_job = None
 
         # curve preview factor (histogram overlay)
@@ -3826,10 +3826,10 @@ class App:
         with self.grade_con:
             for qid in qids:
                 cols = fetch_columns_for_question(self.grade_con, qid)
-                rubric_items = [{"col_key": col_key, "group": (group or ""), "criterion": text, "max_points": float(mx)}
+                rubric_items = [{"col_key": col_key, "group": (group or ""), "criterion": text, "min_points": 0.0, "max_points": float(mx)}
                                 for col_key, group, text, mx in cols]
                 try:
-                    res = self.auto_grader.auto_grade(question_id=qid, merged_code=merged_code, rubric_items=rubric_items, theme_text=theme)
+                    res = self.auto_grader.auto_grade(question_id=qid, question_title=(self.question_map.get(qid, qid) or qid), merged_code=merged_code, rubric_items=rubric_items, theme_text=theme)
                 except Exception as e:
                     messagebox.showerror("Auto grade failed", f"Question {qid}: {e}")
                     return
@@ -3842,7 +3842,7 @@ class App:
                     pts = clamp_points(pts, max_map[col_key])
                     upsert_score(self.grade_con, self.selected_student_id, qid, col_key, pts, note_map.get(col_key, ""), commit=False)
 
-                rationale = (res.get("rationale") or "").strip() or f"Auto-graded draft for {qid}."
+                rationale = (res.get("rationale") or "").strip() or f"Draft feedback for {qid}."
                 total_q = compute_total(self.grade_con, self.selected_student_id, qid)
                 upsert_student_note(self.grade_con, self.selected_student_id, qid, rationale, overall_grade=total_q, commit=False)
 
@@ -3964,7 +3964,7 @@ class App:
         self.progress_var.set(f"Progress: assessed {assessed}/{total} | left {left}")
         curve_k = float(self.curve_preview_var.get())
         self.main_menu_progress_var.set(
-            f"Students assessed: {assessed}/{total} | Left: {left} | Unreviewed auto: {max(0, assessed-reviewed_count)} | Curve preview ×{curve_k:.2f}"
+            f"Students assessed: {assessed}/{total} | Left: {left} | Unreviewed: {max(0, assessed-reviewed_count)} | Curve preview ×{curve_k:.2f}"
         )
 
     def refresh_progress_tab(self):
@@ -4250,13 +4250,13 @@ class App:
             messagebox.showinfo("Missing", "Select a student and a question first.")
             return
         cols = fetch_columns_for_question(self.grade_con, self.selected_question_id)
-        rubric_items = [{"col_key": col_key, "group": (group or ""), "criterion": text, "max_points": float(mx)}
+        rubric_items = [{"col_key": col_key, "group": (group or ""), "criterion": text, "min_points": 0.0, "max_points": float(mx)}
                         for col_key, group, text, mx in cols]
         merged_code = merge_student_code(self.sub_con, self.selected_student_id)
         theme = self.theme_text.get("1.0", tk.END).strip()
 
         try:
-            res = self.auto_grader.auto_grade(question_id=self.selected_question_id, merged_code=merged_code, rubric_items=rubric_items, theme_text=theme)
+            res = self.auto_grader.auto_grade(question_id=self.selected_question_id, question_title=(self.question_map.get(self.selected_question_id, self.selected_question_id) or self.selected_question_id), merged_code=merged_code, rubric_items=rubric_items, theme_text=theme)
         except Exception as e:
             messagebox.showerror("Auto grade failed", str(e))
             return
@@ -4455,9 +4455,9 @@ class App:
 
         stats_text = self.compute_class_stats_text()
         self.class_stats_lbl.config(text=stats_text.replace("Class Stats:", "Class:"))
-        total, assessed, left = self._compute_progress_counts()
+        total, assessed, reviewed_count, left = self._compute_progress_counts()
         self.summary_stats_lbl.config(text=f"Assessed {assessed}/{total} | Left {left}")
-        self._update_student_progress_labels(total, assessed, left)
+        self._update_student_progress_labels(total, assessed, reviewed_count, left)
         self.refresh_histogram()
         self.refresh_progress_tab()
 
