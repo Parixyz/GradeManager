@@ -1005,20 +1005,50 @@ def set_student_reviewed_flag(con: sqlite3.Connection, student_id: str, reviewed
     if commit:
         con.commit()
 
+def _parse_tk_index_value(idx: str) -> tuple[int, int]:
+    try:
+        line, col = str(idx).split(".", 1)
+        return max(1, int(line)), max(0, int(col))
+    except Exception:
+        return 1, 0
+
+def _normalize_index_range(start_index: str, end_index: str) -> tuple[tuple[int, int], tuple[int, int]]:
+    start = _parse_tk_index_value(start_index)
+    end = _parse_tk_index_value(end_index)
+    if end < start:
+        start, end = end, start
+    return start, end
+
+def _ranges_overlap(a_start: tuple[int, int], a_end: tuple[int, int], b_start: tuple[int, int], b_end: tuple[int, int]) -> bool:
+    return not (a_end <= b_start or a_start >= b_end)
+
 def add_code_comment(con: sqlite3.Connection, student_id: str, file_path: str, start_index: str, end_index: str,
                      comment_text: str, color: str = "#FFF2B2"):
+    start, end = _normalize_index_range(start_index, end_index)
+    sidx = f"{start[0]}.{start[1]}"
+    eidx = f"{end[0]}.{end[1]}"
     con.execute("""
       INSERT INTO code_comments(student_id, file_path, start_index, end_index, comment_text, color, created_at)
       VALUES(?,?,?,?,?,?,?)
-    """, (student_id, file_path, start_index, end_index, comment_text, color, now_ts()))
+    """, (student_id, file_path, sidx, eidx, comment_text, color, now_ts()))
     con.commit()
 
 def delete_code_comments_in_range(con: sqlite3.Connection, student_id: str, file_path: str, start_index: str, end_index: str):
-    con.execute("""
-      DELETE FROM code_comments
+    sel_start, sel_end = _normalize_index_range(start_index, end_index)
+    rows = con.execute("""
+      SELECT comment_id, start_index, end_index
+      FROM code_comments
       WHERE student_id=? AND file_path=?
-        AND NOT (end_index<=? OR start_index>=?)
-    """, (student_id, file_path, start_index, end_index))
+    """, (student_id, file_path)).fetchall()
+
+    delete_ids = []
+    for comment_id, sidx, eidx in rows:
+        c_start, c_end = _normalize_index_range(sidx, eidx)
+        if _ranges_overlap(c_start, c_end, sel_start, sel_end):
+            delete_ids.append(comment_id)
+
+    if delete_ids:
+        con.executemany("DELETE FROM code_comments WHERE comment_id=?", [(cid,) for cid in delete_ids])
     con.commit()
 
 def fetch_code_comments_for_file(con: sqlite3.Connection, student_id: str, file_path: str):
