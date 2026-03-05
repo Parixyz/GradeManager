@@ -19,7 +19,7 @@ class GPT_test:
         self.last_raw_response = None
         self.last_result = None
 
-    def _heuristic_grade(self, question_id: str, question_title: str, rubric_items: list[dict], code_text: str) -> dict:
+    def _heuristic_grade(self, question_id: str, question_title: str, rubric_items: list[dict], code_text: str, leniency_level: float = 0.0) -> dict:
         text = (code_text or "").lower()
         scores = []
         lines = [ln for ln in (code_text or "").splitlines() if ln.strip()]
@@ -46,7 +46,8 @@ class GPT_test:
             elif any(k in crit for k in ["condition", "if", "branch"]):
                 ratio = 0.9 if "if(" in text or "if (" in text else 0.35
 
-            points = round(max(0.0, min(mx, mx * ratio)), 2)
+            leniency_factor = max(0.6, min(1.4, 1.0 + (float(leniency_level or 0.0) * 0.5)))
+            points = round(max(0.0, min(mx, mx * ratio * leniency_factor)), 2)
             note = f"Estimated against criterion text for {question_id}."
             scores.append({"col_key": col_key, "points": points, "note": note})
 
@@ -65,7 +66,7 @@ class GPT_test:
 
         return {"scores": scores, "rationale": rationale, "comments": comments}
 
-    def grade_question(self, *, question_id: str, question_title: str = "", rubric_items: list[dict], code_text: str, extra_prompt: str = "") -> dict:
+    def grade_question(self, *, question_id: str, question_title: str = "", rubric_items: list[dict], code_text: str, extra_prompt: str = "", leniency_level: float = 0.0) -> dict:
         self.last_raw_response = None
         self.last_result = None
         if not self.api_key:
@@ -76,16 +77,23 @@ class GPT_test:
                 "rubric_items": rubric_items or [],
                 "code": code_text,
                 "extra_prompt": extra_prompt or "",
+                "leniency_level": float(leniency_level or 0.0),
             }
             self.last_request_body = None
-            result = self._heuristic_grade(question_id, question_title, rubric_items, code_text)
+            result = self._heuristic_grade(question_id, question_title, rubric_items, code_text, leniency_level=float(leniency_level or 0.0))
             self.last_result = result
             return result
 
         prompt = {
             "question_id": question_id,
             "question_title": (question_title or question_id),
-            "instructions": (self.system_prompt or "Grade code strictly but fairly.") + "\n" + (extra_prompt or "") + "\nUse the exact question context and rubric min/max ranges.",
+            "instructions": (
+                (self.system_prompt or "Grade code strictly but fairly.")
+                + "\n"
+                + (extra_prompt or "")
+                + f"\nLeniency level: {float(leniency_level or 0.0):.2f} (-1 strict, +1 lenient)."
+                + "\nUse the exact question context and rubric min/max ranges."
+            ),
             "rubric_items": [{**ri, "min_points": float(ri.get("min_points", 0.0) or 0.0), "max_points": float(ri.get("max_points", 0.0) or 0.0)} for ri in (rubric_items or [])],
             "code": code_text,
             "output_format": {
