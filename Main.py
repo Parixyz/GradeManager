@@ -38,6 +38,7 @@ import sqlite3
 import hashlib
 import math
 import random
+import textwrap
 from pathlib import Path
 from datetime import datetime
 import json
@@ -80,6 +81,10 @@ SUBMISSIONS_DB = "submissions.sqlite"
 DEFAULT_THEME = "Grade strictly. If unclear, give 0 and explain why."
 
 ID_DIGITS_RE = re.compile(r"\b\d{5,12}\b")
+POSITIVE_COMMENT_RE = re.compile(
+    r"\b(good|great|nice|well done|correct|excellent|clean|solid|perfect)\b",
+    re.IGNORECASE,
+)
 
 
 # =============================================================================
@@ -108,6 +113,15 @@ def extract_numeric_id(raw: str) -> str:
 
 def is_full_student(student_id: str) -> bool:
     return (student_id or "").strip().lower() == "full"
+
+
+def is_mistake_focused_comment(text: str) -> bool:
+    msg = (text or "").strip()
+    if not msg:
+        return False
+    if POSITIVE_COMMENT_RE.search(msg) and not any(k in msg.lower() for k in ["missing", "error", "bug", "incorrect", "wrong", "fix", "issue", "fail"]):
+        return False
+    return True
 
 
 # =============================================================================
@@ -1395,6 +1409,16 @@ class PDFExporter:
             snippet = snippet[:max_chars].rstrip() + " …"
         return snippet
 
+    def _format_code_block_for_pdf(self, code_text: str, max_width: int = 92, max_lines: int = 12) -> str:
+        code_text = (code_text or "").replace("	", "    ")
+        wrapped: list[str] = []
+        for raw in code_text.splitlines() or [""]:
+            parts = textwrap.wrap(raw, width=max_width, break_long_words=True, break_on_hyphens=False)
+            wrapped.extend(parts or [""])
+        if len(wrapped) > max_lines:
+            wrapped = wrapped[:max_lines] + ["… [truncated]"]
+        return "\n".join(wrapped)
+
     def export_student_pdf(self, sid: str, out_path: Path):
         if SimpleDocTemplate is None:
             raise RuntimeError("reportlab not installed. Install: pip install reportlab")
@@ -1500,18 +1524,21 @@ class PDFExporter:
                 cell_style = styles["BodyText"].clone("comment_cell_style")
                 cell_style.fontSize = 8
                 cell_style.leading = 10
+                code_cell_style = styles["Code"].clone("comment_code_cell_style")
+                code_cell_style.fontSize = 7
+                code_cell_style.leading = 8
 
                 td = [["File", "Range", "Code (highlighted part)", "Comment"]]
                 for fp, sidx, eidx, txt, _color, _ts in rows:
                     snippet = self._extract_code_snippet(fp, sidx, eidx)
                     esc_file = Path(fp).name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                    esc_snippet = (snippet or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    code_block = self._format_code_block_for_pdf(snippet or "(empty selection)", max_width=60, max_lines=10)
                     esc_comment = (txt or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                     td.append([
                         Paragraph(esc_file, cell_style),
                         Paragraph(f"{sidx}–{eidx}", cell_style),
-                        Paragraph(esc_snippet or "(empty selection)", cell_style),
-                        Paragraph(esc_comment[:320], cell_style),
+                        Preformatted(code_block, code_cell_style),
+                        Paragraph(esc_comment[:280], cell_style),
                     ])
 
                 tbl2 = Table(td, colWidths=[85, 90, 200, 181], repeatRows=1)
@@ -1522,6 +1549,7 @@ class PDFExporter:
                     ("VALIGN", (0,0), (-1,-1), "TOP"),
                     ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
                     ("BACKGROUND", (2,1), (2,-1), colors.HexColor("#FFF9A6")),
+                    ("BACKGROUND", (3,1), (3,-1), colors.HexColor("#FFFDF7")),
                     ("FONTSIZE", (0,0), (-1,-1), 8),
                     ("LEFTPADDING", (0,0), (-1,-1), 4),
                     ("RIGHTPADDING", (0,0), (-1,-1), 4),
@@ -1542,7 +1570,8 @@ class PDFExporter:
                 if not rendered_lines:
                     story.append(Paragraph("(empty file)", styles["Normal"]))
                 else:
-                    table_data = [[Paragraph(line or " ", line_style)] for line in rendered_lines]
+                    compact_lines = [self._format_code_block_for_pdf(line, max_width=112, max_lines=2) for line in rendered_lines]
+                    table_data = [[Paragraph(line or " ", line_style)] for line in compact_lines]
                     tbl_code = Table(table_data, colWidths=[516], repeatRows=0)
                     tbl_code.setStyle(TableStyle([
                         ("GRID", (0,0), (-1,-1), 0.2, colors.HexColor("#E0E0E0")),
@@ -3315,7 +3344,7 @@ class App:
         bundle_box = ttk.Frame(left, style="PastelCard.TFrame", padding=8)
         bundle_box.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
         bundle_box.columnconfigure(0, weight=1)
-        bundle_box.rowconfigure(2, weight=1)
+        bundle_box.rowconfigure(3, weight=1)
         ttk.Label(bundle_box, text="Bundle builder", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
         checks = ttk.Frame(bundle_box, style="PastelCard.TFrame")
         checks.grid(row=1, column=0, sticky="w", pady=(4, 6))
@@ -3326,11 +3355,22 @@ class App:
         ttk.Label(checks, text="Code chars", style="PastelCard.TLabel").pack(side=tk.LEFT, padx=(10, 4))
         ttk.Entry(checks, textvariable=self.chat_code_char_limit_var, width=8).pack(side=tk.LEFT)
 
+        leniency_row = ttk.Frame(bundle_box, style="PastelCard.TFrame")
+        leniency_row.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        ttk.Label(leniency_row, textvariable=self.leniency_label_var, style="PastelCard.TLabel").pack(side=tk.LEFT)
+        ttk.Scale(
+            leniency_row,
+            from_=-1.0,
+            to=1.0,
+            variable=self.leniency_level_var,
+            command=lambda _v: self._on_leniency_change(),
+        ).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(8, 0))
+
         self.chat_bundle_widget = tk.Text(bundle_box, height=10, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
-        self.chat_bundle_widget.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
+        self.chat_bundle_widget.grid(row=3, column=0, sticky="nsew", pady=(0, 6))
 
         bundle_btns = ttk.Frame(bundle_box, style="PastelCard.TFrame")
-        bundle_btns.grid(row=3, column=0, sticky="w")
+        bundle_btns.grid(row=4, column=0, sticky="w")
         ttk.Button(bundle_btns, text="Build bundle", command=self.refresh_chat_preview).pack(side=tk.LEFT)
         ttk.Button(bundle_btns, text="Copy bundle", command=self.copy_chat_bundle).pack(side=tk.LEFT, padx=6)
         ttk.Checkbutton(bundle_btns, text="Auto-refresh bundle", variable=self.chat_auto_bundle_var).pack(side=tk.LEFT, padx=(6, 0))
@@ -4488,7 +4528,7 @@ class App:
                 except Exception:
                     line_no = 1
                 txt = (c.get("comment") or "").strip()
-                if not txt:
+                if not is_mistake_focused_comment(txt):
                     continue
                 for fp, content in file_map.items():
                     if not content:
