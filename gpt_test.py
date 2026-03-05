@@ -148,22 +148,15 @@ class GPT_test:
             return "Please enter a message first."
 
         if not self.api_key:
-            # Quiet local-mode response: avoid noisy status text in chat transcript.
-            if not clean_ctx:
-                return f"Got it. You said: {clean_msg[:300]}"
-
-            ctx_lines = [ln.strip() for ln in clean_ctx.splitlines() if ln.strip()]
-            signal = []
-            for ln in ctx_lines:
-                low = ln.lower()
-                if low.startswith("# student:") or low.startswith("# rubric") or low.startswith("# my message"):
-                    signal.append(ln)
-                if len(signal) >= 3:
-                    break
-
-            if signal:
-                return "I used your local bundle context:\n- " + "\n- ".join(signal) + f"\n\nReply: {clean_msg[:300]}"
-            return f"I read your bundle ({len(ctx_lines)} non-empty lines). Reply: {clean_msg[:300]}"
+            lines = [
+                "Offline chat mode is active (no API key configured).",
+                f"I received your message: {clean_msg[:300]}",
+            ]
+            if clean_ctx:
+                ctx_lines = len(clean_ctx.splitlines())
+                lines.append(f"Bundle attached with {ctx_lines} line(s).")
+            lines.append("Tip: configure API key in Settings to get model responses.")
+            return "\n".join(lines)
 
         user_payload = {
             "message": clean_msg,
