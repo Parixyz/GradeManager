@@ -32,6 +32,7 @@ Dependencies:
 """
 
 import csv
+import difflib
 import os
 import re
 import sqlite3
@@ -4206,22 +4207,36 @@ class App:
             )
             return
 
+        resolved_sid_map: dict[str, str | None] = {}
         matched_rows = 0
+        fuzzy_matched_rows = 0
         for row in self.upload_rows:
             sid = normalize_student_id(str(row.get(id_col, "")))
-            if not sid or sid not in db_students:
+            resolved_sid = sid
+            if sid and sid not in db_students:
+                if sid not in resolved_sid_map:
+                    resolved_sid_map[sid] = self._prompt_for_closest_student_match(
+                        missing_sid=sid,
+                        row=row,
+                        db_students=db_students,
+                    )
+                resolved_sid = resolved_sid_map[sid]
+
+            if not resolved_sid or resolved_sid not in db_students:
                 continue
 
             matched_rows += 1
+            if sid != resolved_sid:
+                fuzzy_matched_rows += 1
             for gcol in grade_cols:
                 qid = grade_col_to_qid.get(gcol)
                 if qid:
                     mx = qmax.get(qid, 0.0)
-                    total = compute_total_by_display_id(self.grade_con, sid, qid)
+                    total = compute_total_by_display_id(self.grade_con, resolved_sid, qid)
                     pct = (total / mx * 100.0) if mx > 0 else 0.0
                     row[gcol] = f"{max(0.0, min(100.0, pct)):.2f}"
                 else:
-                    overall = sum(compute_total_by_display_id(self.grade_con, sid, qid) for qid in question_ids)
+                    overall = sum(compute_total_by_display_id(self.grade_con, resolved_sid, qid) for qid in question_ids)
                     pct = (overall / overall_max * 100.0) if overall_max > 0 else 0.0
                     row[gcol] = f"{max(0.0, min(100.0, pct)):.2f}"
 
@@ -4235,11 +4250,58 @@ class App:
 
         self.upload_unmatched_ids = missing_in_excel
         self.upload_result_var.set(
-            f"Filled {matched_rows} rows. DB students matched in file: {len(excel_ids & set(db_students.keys()))}/{len(db_students)} | "
+            f"Filled {matched_rows} rows ({fuzzy_matched_rows} via closest-match confirmation). "
+            f"DB students matched in file: {len(excel_ids & set(db_students.keys()))}/{len(db_students)} | "
             f"DB students missing in file: {len(self.upload_unmatched_ids)} | "
             f"Students with actual grade values in file: {students_with_values_after_fill}"
         )
         self._refresh_upload_preview()
+
+    def _prompt_for_closest_student_match(self, missing_sid: str, row: dict, db_students: dict[str, str]) -> str | None:
+        """
+        For missing IDs in upload files, propose close DB IDs one by one and let the user confirm/reject.
+        Returns confirmed DB ID or None.
+        """
+        candidates = self._closest_student_candidates(missing_sid, row, db_students)
+        if not candidates:
+            return None
+
+        first = str(row.get("First Name", "")).strip()
+        last = str(row.get("Last Name", "")).strip()
+        row_name = " ".join(p for p in [first, last] if p).strip()
+
+        for db_sid, score in candidates:
+            db_name = db_students.get(db_sid, "")
+            msg = (
+                f"Student ID '{missing_sid}' was not found in the DB.\n\n"
+                f"Closest match candidate:\n"
+                f"Upload row: {missing_sid}" + (f" — {row_name}" if row_name else "") + "\n"
+                f"DB student: {db_sid}" + (f" — {db_name}" if db_name else "") + "\n"
+                f"Similarity: {score:.0%}\n\n"
+                "Use this student for grading this upload ID?\n"
+                "Yes = confirm this match\n"
+                "No = try next candidate"
+            )
+            if messagebox.askyesno("Closest student match", msg):
+                return db_sid
+        return None
+
+    def _closest_student_candidates(self, missing_sid: str, row: dict, db_students: dict[str, str], limit: int = 5) -> list[tuple[str, float]]:
+        first = str(row.get("First Name", "")).strip().lower()
+        last = str(row.get("Last Name", "")).strip().lower()
+        row_name = " ".join(p for p in [first, last] if p).strip()
+
+        scored: list[tuple[str, float]] = []
+        for db_sid, db_name in db_students.items():
+            sid_score = difflib.SequenceMatcher(None, missing_sid, db_sid).ratio()
+            name_score = 0.0
+            if row_name and db_name:
+                name_score = difflib.SequenceMatcher(None, row_name, db_name.lower()).ratio()
+            combined = sid_score * 0.75 + name_score * 0.25
+            scored.append((db_sid, combined))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:limit]
 
     def save_filled_upload_file(self):
         if not self.upload_rows or not self.upload_headers:
