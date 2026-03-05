@@ -4716,6 +4716,8 @@ class App:
             return
 
         theme = self._current_theme_instructions()
+        self._persist_theme_leniency(theme)
+        leniency = float(self.leniency_level_var.get())
         try:
             with self.grade_con:
                 self._auto_grade_one_student(self.selected_student_id, qids, theme)
@@ -4726,7 +4728,7 @@ class App:
         self.load_student_question_view()
         self.refresh_summary()
         self.refresh_progress_tab()
-        messagebox.showinfo("Grade Files", "Draft grading complete for this student. Please review.")
+        messagebox.showinfo("Grade Files", f"Draft grading complete for this student using theme + leniency {leniency:.2f}. Please review.")
 
     def auto_grade_all_students(self):
         if not self.require_grading_db():
@@ -4742,6 +4744,8 @@ class App:
             return
 
         theme = self._current_theme_instructions()
+        self._persist_theme_leniency(theme)
+        leniency = float(self.leniency_level_var.get())
         failed = []
         with self.grade_con:
             for sid in student_ids:
@@ -4756,15 +4760,18 @@ class App:
         if failed:
             messagebox.showwarning("Grade All", "Completed with some errors\n" + "\n".join(failed[:8]))
         else:
-            messagebox.showinfo("Grade All", f"Draft grading complete for {len(student_ids)} students. Please review.")
+            messagebox.showinfo("Grade All", f"Draft grading complete for {len(student_ids)} students using theme + leniency {leniency:.2f}. Please review.")
 
     # ---- theme ----
+    def _persist_theme_leniency(self, theme: str):
+        meta_set(self.grade_con, "theme", theme)
+        meta_set(self.grade_con, "leniency_level", f"{float(self.leniency_level_var.get()):.3f}")
+
     def save_theme(self, source: str = "auto"):
         if not self.require_grading_db():
             return
         theme = self._current_theme_instructions(source=source)
-        meta_set(self.grade_con, "theme", theme)
-        meta_set(self.grade_con, "leniency_level", f"{float(self.leniency_level_var.get()):.3f}")
+        self._persist_theme_leniency(theme)
         messagebox.showinfo("Saved", "Theme + leniency saved.")
 
 
