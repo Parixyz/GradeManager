@@ -2953,10 +2953,19 @@ class App:
         self.prompt_result_text_widget = None
         self.chat_message_widget = None
         self.chat_preview_widget = None
+        self.chat_transcript_widget = None
+        self.chat_bundle_widget = None
+        self.chat_auto_bundle_var = tk.BooleanVar(value=True)
         self.chat_include_code_var = tk.BooleanVar(value=True)
         self.chat_include_scheme_var = tk.BooleanVar(value=True)
         self.chat_include_prompt_var = tk.BooleanVar(value=True)
         self.last_auto_grade_trace = {"prompt": "", "result": "", "source": ""}
+
+        self.db_table_pick_var = tk.StringVar(value="")
+        self.db_table_listbox = None
+        self.db_schema_text = None
+        self.db_rows_tree = None
+        self.db_rows_status_var = tk.StringVar(value="No table selected.")
 
         # Auto-grader (heuristic + optional GPT)
         self.gpt_tester = GPT_test()
@@ -3045,6 +3054,7 @@ class App:
         self.tab_progress = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_regex = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_ai_trace = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
+        self.tab_db = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_settings = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
 
         self.nb.add(self.tab_grade, text="Grade")
@@ -3053,6 +3063,7 @@ class App:
         self.nb.add(self.tab_progress, text="Progress")
         self.nb.add(self.tab_regex, text="Regex / Patterns")
         self.nb.add(self.tab_ai_trace, text="AI Prompt + Chat")
+        self.nb.add(self.tab_db, text="DB Browser")
         self.nb.add(self.tab_settings, text="Settings")
 
         self._build_grade_tab()
@@ -3061,6 +3072,7 @@ class App:
         self._build_progress_tab()
         self._build_regex_tab()
         self._build_ai_trace_tab()
+        self._build_db_tab()
         self._build_settings_tab()
         self._ensure_default_regex_profile()
         self.load_gpt_settings()
@@ -3207,26 +3219,39 @@ class App:
         composer = ttk.Frame(self.tab_ai_trace, style="PastelCard.TFrame", padding=8)
         composer.grid(row=3, column=0, sticky="nsew")
         composer.columnconfigure(0, weight=1)
-        composer.rowconfigure(5, weight=1)
-        ttk.Label(composer, text="Chat helper (copy both code files + optional scheme/prompt trace + your message)", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        composer.rowconfigure(8, weight=1)
+        ttk.Label(composer, text="Chat helper + Chatbox", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
         checks = ttk.Frame(composer, style="PastelCard.TFrame")
         checks.grid(row=1, column=0, sticky="w", pady=(4, 6))
         ttk.Checkbutton(checks, text="Include student code", variable=self.chat_include_code_var).pack(side=tk.LEFT)
         ttk.Checkbutton(checks, text="Include rubric scheme", variable=self.chat_include_scheme_var).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Checkbutton(checks, text="Include prompt process + output", variable=self.chat_include_prompt_var).pack(side=tk.LEFT, padx=(10, 0))
 
-        ttk.Label(composer, text="Your chat message", style="PastelCard.TLabel").grid(row=2, column=0, sticky="w")
-        self.chat_message_widget = tk.Text(composer, height=4, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
-        self.chat_message_widget.grid(row=3, column=0, sticky="ew", pady=(4, 6))
+        ttk.Label(composer, text="Bundle payload (editable)", style="PastelCard.TLabel").grid(row=2, column=0, sticky="w")
+        self.chat_bundle_widget = tk.Text(composer, height=6, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.chat_bundle_widget.grid(row=3, column=0, sticky="ew", pady=(4, 6))
+
+        bundle_btns = ttk.Frame(composer, style="PastelCard.TFrame")
+        bundle_btns.grid(row=4, column=0, sticky="w", pady=(0, 6))
+        ttk.Button(bundle_btns, text="Build bundle", command=self.refresh_chat_preview).pack(side=tk.LEFT)
+        ttk.Button(bundle_btns, text="Copy bundle", command=self.copy_chat_bundle).pack(side=tk.LEFT, padx=6)
+        ttk.Checkbutton(bundle_btns, text="Auto-refresh bundle", variable=self.chat_auto_bundle_var).pack(side=tk.LEFT, padx=(6, 0))
+
+        ttk.Label(composer, text="Your chat message", style="PastelCard.TLabel").grid(row=5, column=0, sticky="w")
+        self.chat_message_widget = tk.Text(composer, height=3, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.chat_message_widget.grid(row=6, column=0, sticky="ew", pady=(4, 6))
 
         chat_btns = ttk.Frame(composer, style="PastelCard.TFrame")
-        chat_btns.grid(row=4, column=0, sticky="w", pady=(0, 6))
-        ttk.Button(chat_btns, text="Preview bundle", command=self.refresh_chat_preview).pack(side=tk.LEFT)
-        ttk.Button(chat_btns, text="Copy bundle", command=self.copy_chat_bundle).pack(side=tk.LEFT, padx=6)
+        chat_btns.grid(row=7, column=0, sticky="w", pady=(0, 6))
+        ttk.Button(chat_btns, text="Send", command=self.send_chat_message).pack(side=tk.LEFT)
+        ttk.Button(chat_btns, text="Clear chat", command=self.clear_chat_transcript).pack(side=tk.LEFT, padx=6)
 
-        self.chat_preview_widget = tk.Text(composer, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
-        self.chat_preview_widget.grid(row=5, column=0, sticky="nsew")
+        self.chat_transcript_widget = tk.Text(composer, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.chat_transcript_widget.grid(row=8, column=0, sticky="nsew")
+
+        self.chat_preview_widget = self.chat_bundle_widget
         self.refresh_prompt_trace_tab()
+        self.refresh_chat_preview()
 
     def _format_last_prompt_process(self):
         data = self.last_auto_grade_trace.get("prompt")
@@ -3302,6 +3327,38 @@ class App:
         self.root.update_idletasks()
         self.refresh_chat_preview()
         messagebox.showinfo("Copied", "Chat bundle copied to clipboard.")
+
+    def _append_chat_transcript(self, role: str, text: str):
+        if self.chat_transcript_widget is None:
+            return
+        stamp = datetime.now().strftime("%H:%M:%S")
+        self.chat_transcript_widget.insert(tk.END, f"[{stamp}] {role}\n{text.strip()}\n\n")
+        self.chat_transcript_widget.see(tk.END)
+
+    def send_chat_message(self):
+        msg = self.chat_message_widget.get("1.0", tk.END).strip() if self.chat_message_widget else ""
+        if not msg:
+            messagebox.showinfo("Missing", "Type a chat message first.")
+            return
+
+        if self.chat_auto_bundle_var.get():
+            self.refresh_chat_preview()
+
+        bundle = self.chat_bundle_widget.get("1.0", tk.END).strip() if self.chat_bundle_widget else ""
+        self._append_chat_transcript("You", msg)
+
+        try:
+            reply = self.gpt_tester.chat(message=msg, context_bundle=bundle)
+        except Exception as exc:
+            reply = f"Chat failed: {exc}"
+
+        self._append_chat_transcript("Assistant", reply)
+        if self.chat_message_widget is not None:
+            self.chat_message_widget.delete("1.0", tk.END)
+
+    def clear_chat_transcript(self):
+        if self.chat_transcript_widget is not None:
+            self.chat_transcript_widget.delete("1.0", tk.END)
 
     def clear_selected_student_grade(self):
         if not self.require_grading_db():
@@ -3429,6 +3486,96 @@ class App:
         ttk.Label(self.tab_stats,
                   text="Note: Curve preview uses multiplication factor (clipped at 0). It does not change stored grades unless you export/transform them externally.",
                   style="Pastel.TLabel").pack(anchor="w", pady=(8, 0))
+
+    def _build_db_tab(self):
+        self.tab_db.columnconfigure(1, weight=1)
+        self.tab_db.rowconfigure(1, weight=1)
+
+        top = ttk.Frame(self.tab_db, style="Pastel.TFrame")
+        top.grid(row=0, column=0, columnspan=2, sticky="ew")
+        ttk.Button(top, text="Refresh Tables", command=self.refresh_db_tables).pack(side=tk.LEFT)
+        ttk.Button(top, text="Preview 200 rows", command=self.preview_selected_table).pack(side=tk.LEFT, padx=6)
+        ttk.Label(top, textvariable=self.db_rows_status_var, style="Pastel.TLabel").pack(side=tk.RIGHT)
+
+        left = ttk.Frame(self.tab_db, style="PastelCard.TFrame", padding=8)
+        left.grid(row=1, column=0, sticky="nsw", padx=(0, 8))
+        ttk.Label(left, text="Tables", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        self.db_table_listbox = tk.Listbox(left, width=36, bg=self.palette["panel"], fg=self.palette["text"], highlightthickness=0, selectbackground=self.palette["select"])
+        self.db_table_listbox.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        self.db_table_listbox.bind("<<ListboxSelect>>", lambda _e: self.preview_selected_table())
+
+        right = ttk.Frame(self.tab_db, style="PastelCard.TFrame", padding=8)
+        right.grid(row=1, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+
+        ttk.Label(right, text="Table schema", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
+        self.db_schema_text = tk.Text(right, height=7, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.db_schema_text.grid(row=0, column=0, sticky="ew", pady=(20, 8))
+
+        rows_frame = ttk.Frame(right, style="PastelCard.TFrame")
+        rows_frame.grid(row=1, column=0, sticky="nsew")
+        rows_frame.rowconfigure(0, weight=1)
+        rows_frame.columnconfigure(0, weight=1)
+
+        self.db_rows_tree = ttk.Treeview(rows_frame, columns=(), show="headings")
+        self.db_rows_tree.grid(row=0, column=0, sticky="nsew")
+        ysb = ttk.Scrollbar(rows_frame, orient="vertical", command=self.db_rows_tree.yview)
+        ysb.grid(row=0, column=1, sticky="ns")
+        xsb = ttk.Scrollbar(rows_frame, orient="horizontal", command=self.db_rows_tree.xview)
+        xsb.grid(row=1, column=0, sticky="ew")
+        self.db_rows_tree.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+
+        self.refresh_db_tables()
+
+    def refresh_db_tables(self):
+        if self.db_table_listbox is None:
+            return
+        self.db_table_listbox.delete(0, tk.END)
+        rows = self.sub_con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+        for (name,) in rows:
+            self.db_table_listbox.insert(tk.END, name)
+        if rows:
+            self.db_table_listbox.selection_set(0)
+            self.preview_selected_table()
+
+    def _selected_db_table(self) -> str:
+        if self.db_table_listbox is None:
+            return ""
+        sel = self.db_table_listbox.curselection()
+        if not sel:
+            return ""
+        return self.db_table_listbox.get(sel[0])
+
+    def preview_selected_table(self):
+        table = self._selected_db_table()
+        if not table:
+            self.db_rows_status_var.set("No table selected.")
+            return
+
+        safe_table = '"' + table.replace('"', '""') + '"'
+        cols = self.sub_con.execute(f"PRAGMA table_info({safe_table})").fetchall()
+        col_names = [r[1] for r in cols]
+        schema_lines = [f"{r[1]} {r[2]}{' PRIMARY KEY' if r[5] else ''}" for r in cols]
+        if self.db_schema_text is not None:
+            self.db_schema_text.delete("1.0", tk.END)
+            self.db_schema_text.insert("1.0", "\n".join(schema_lines) or "(no schema)")
+
+        rows = self.sub_con.execute(f"SELECT * FROM {safe_table} LIMIT 200").fetchall()
+
+        if self.db_rows_tree is None:
+            return
+        self.db_rows_tree.delete(*self.db_rows_tree.get_children())
+        self.db_rows_tree["columns"] = col_names
+        for c in col_names:
+            self.db_rows_tree.heading(c, text=c)
+            self.db_rows_tree.column(c, width=140, anchor="w")
+        for row in rows:
+            vals = ["" if v is None else str(v) for v in row]
+            self.db_rows_tree.insert("", tk.END, values=vals)
+
+        total = self.sub_con.execute(f"SELECT COUNT(*) FROM {safe_table}").fetchone()[0]
+        self.db_rows_status_var.set(f"Table: {table} | showing {len(rows)} of {total} row(s)")
 
     def _default_regex_payload(self) -> dict:
         return {
