@@ -858,6 +858,36 @@ def compute_total(con: sqlite3.Connection, student_id: str, question_id: str | N
     """, (student_id, question_id)).fetchone()
     return float(row[0] if row else 0.0)
 
+def build_question_display_map(con: sqlite3.Connection) -> dict[str, str]:
+    rows = con.execute("SELECT question_id, COALESCE(sub_id, '') FROM rubric_questions ORDER BY question_id").fetchall()
+    out = {}
+    for qid, sub_id in rows:
+        qid_clean = (qid or "").strip()
+        sub_clean = (sub_id or "").strip()
+        if not qid_clean:
+            continue
+        out[qid_clean] = sub_clean or qid_clean
+    return out
+
+def compute_total_by_display_id(con: sqlite3.Connection, student_id: str, display_question_id: str) -> float:
+    if not display_question_id:
+        return 0.0
+    row = con.execute("""
+      SELECT COALESCE(SUM(COALESCE(rs.points,0)),0)
+      FROM rubric_scores rs
+      JOIN rubric_questions rq ON rq.question_id = rs.question_id
+      WHERE rs.student_id=? AND COALESCE(NULLIF(TRIM(rq.sub_id),''), rq.question_id)=?
+    """, (student_id, display_question_id)).fetchone()
+    return float(row[0] if row else 0.0)
+
+def fetch_display_question_ids(con: sqlite3.Connection):
+    rows = con.execute("""
+      SELECT DISTINCT COALESCE(NULLIF(TRIM(sub_id),''), question_id) AS display_id
+      FROM rubric_questions
+      ORDER BY display_id
+    """).fetchall()
+    return [r[0] for r in rows if r and r[0]]
+
 def compute_overall_total(con: sqlite3.Connection, student_id: str) -> float:
     row = con.execute("""
       SELECT COALESCE(SUM(COALESCE(points,0)),0)
@@ -1037,9 +1067,10 @@ def fetch_rubric_parts(con: sqlite3.Connection):
 
 def compute_question_max(con: sqlite3.Connection, question_id: str) -> float:
     row = con.execute("""
-      SELECT COALESCE(SUM(col_max),0)
-      FROM rubric_columns
-      WHERE question_id=?
+      SELECT COALESCE(SUM(rc.col_max),0)
+      FROM rubric_columns rc
+      JOIN rubric_questions rq ON rq.question_id = rc.question_id
+      WHERE COALESCE(NULLIF(TRIM(rq.sub_id),''), rq.question_id)=?
     """, (question_id,)).fetchone()
     return float(row[0] if row else 0.0)
 
@@ -1053,11 +1084,12 @@ def export_all_to_excel(
     ws_sum = wb.active
     ws_sum.title = "Brightspace_Summary"
 
-    question_ids = fetch_all_question_ids(grade_con)
+    question_ids = fetch_display_question_ids(grade_con)
     qmax = {qid: compute_question_max(grade_con, qid) for qid in question_ids}
 
     parts = fetch_rubric_parts(grade_con)
-    part_headers = [f"{qid}:{ck}" for qid, ck, _g, _t, _m in parts]
+    q_display_map = build_question_display_map(grade_con)
+    part_headers = [f"{q_display_map.get(qid, qid)}:{ck}" for qid, ck, _g, _t, _m in parts]
 
     ws_sum.append(["Student ID", "Student Name", "LabID", *part_headers, *[f"{qid}_total" for qid in question_ids], "Overall raw"])
 
@@ -1081,15 +1113,17 @@ def export_all_to_excel(
             val = score_cache[qid].get(ck)
             row.append("" if val is None else val)
         for qid in question_ids:
-            row.append(compute_total(grade_con, sid, qid))
-        row.append(compute_overall_total(grade_con, sid))
+            row.append(compute_total_by_display_id(grade_con, sid, qid))
+        row.append(sum(compute_total_by_display_id(grade_con, sid, qid) for qid in question_ids))
         ws_sum.append(row)
 
-    # Per-question sheets
+    # Per-question sheets (grouped by display/sub id)
+    raw_qids = fetch_all_question_ids(grade_con)
     for qid in question_ids:
+        member_qids = [rq for rq in raw_qids if q_display_map.get(rq, rq) == qid] or [qid]
         title_row = grade_con.execute(
             "SELECT question_title FROM rubric_questions WHERE question_id=?",
-            (qid,)
+            (member_qids[0],)
         ).fetchone()
         qtitle = title_row[0] if title_row else qid
 
@@ -1097,23 +1131,24 @@ def export_all_to_excel(
         ws.append([f"{qid} — {qtitle}"])
         ws.append([])
 
-        cols = fetch_columns_for_question(grade_con, qid)
+        cols = []
+        for mqid in member_qids:
+            cols.extend([(mqid, *c) for c in fetch_columns_for_question(grade_con, mqid)])
 
         header = ["Student ID", "Student Name", "LabID", "Total", "Rationale"]
-        for col_key, group, text, mx in cols:
-            header.append(f"{(group or '').strip()} | {text} (/ {mx:g})".strip(" |"))
+        for mqid, col_key, group, text, mx in cols:
+            header.append(f"{mqid} | {(group or '').strip()} | {text} (/ {mx:g})".strip(" |"))
             header.append("Note")
         ws.append(header)
 
         for sid, sname, lab in assessed_students:
-            total = compute_total(grade_con, sid, qid)
-            note_row = load_student_note(grade_con, sid, qid)
+            total = compute_total_by_display_id(grade_con, sid, qid)
+            note_row = load_student_note(grade_con, sid, member_qids[0])
             rationale = note_row[0] if note_row and note_row[0] else ""
 
-            score_map, note_map = load_student_scores(grade_con, sid, qid)
-
             row = [sid, sname, lab, total, rationale]
-            for col_key, _group, _text, _mx in cols:
+            for mqid, col_key, _group, _text, _mx in cols:
+                score_map, note_map = load_student_scores(grade_con, sid, mqid)
                 row.append("" if score_map.get(col_key) is None else score_map.get(col_key))
                 row.append(note_map.get(col_key, "") or "")
             ws.append(row)
@@ -1131,12 +1166,12 @@ def export_all_to_excel(
         sid, sname, lab = full_row
         ws_full = wb.create_sheet(title="FULL_Model")
         ws_full.append(["Student ID", "Student Name", "LabID", "Overall raw"])
-        ws_full.append([sid, sname, lab, compute_overall_total(grade_con, sid)])
+        ws_full.append([sid, sname, lab, sum(compute_total_by_display_id(grade_con, sid, qid) for qid in question_ids)])
 
         ws_full.append([])
         ws_full.append(["Question", "Total", "Rationale"])
         for qid in question_ids:
-            qtotal = compute_total(grade_con, sid, qid)
+            qtotal = compute_total_by_display_id(grade_con, sid, qid)
             nrow = load_student_note(grade_con, sid, qid)
             ws_full.append([qid, qtotal, nrow[0] if nrow and nrow[0] else ""])
 
@@ -1391,30 +1426,40 @@ class PDFExporter:
         story.append(Paragraph(f"<b>Overall total:</b> {overall:g}", styles["Normal"]))
         story.append(Spacer(1, 12))
 
-        # Per-question grading details
+        # Per-question grading details (grouped by display/sub question id)
+        q_display_map = build_question_display_map(self.grade_con)
+        display_to_qids: dict[str, list[str]] = {}
         for qid in fetch_all_question_ids(self.grade_con):
-            qtitle = self.question_map.get(qid, qid)
-            total = compute_total(self.grade_con, sid, qid)
-            if total <= 0 and not fetch_columns_for_question(self.grade_con, qid):
+            did = q_display_map.get(qid, qid)
+            display_to_qids.setdefault(did, []).append(qid)
+
+        for qid in fetch_display_question_ids(self.grade_con):
+            members = display_to_qids.get(qid, [qid])
+            qtitle = self.question_map.get(members[0], self.question_map.get(qid, qid))
+            total = compute_total_by_display_id(self.grade_con, sid, qid)
+            all_cols = []
+            for mqid in members:
+                all_cols.extend([(mqid, *c) for c in fetch_columns_for_question(self.grade_con, mqid)])
+            if total <= 0 and not all_cols:
                 continue
             story.append(Paragraph(f"<b>{qid}</b> — {qtitle} (Total: {total:g})", styles["Heading2"]))
 
             if self.student_pdf_options["include_grade_tables"]:
-                cols = fetch_columns_for_question(self.grade_con, qid)
-                score_map, note_map = load_student_scores(self.grade_con, sid, qid)
 
                 cell_style = styles["BodyText"].clone("rubric_cell_style")
                 cell_style.fontSize = 8
                 cell_style.leading = 10
 
-                table_data = [["Group", "Criterion", "Max", "Pts", "Note"]]
-                for col_key, group, text, mx in cols:
+                table_data = [["Question", "Group", "Criterion", "Max", "Pts", "Note"]]
+                for mqid, col_key, group, text, mx in all_cols:
+                    score_map, note_map = load_student_scores(self.grade_con, sid, mqid)
                     pts = score_map.get(col_key, 0.0) or 0.0
                     note = (note_map.get(col_key, "") or "")
                     esc_group = (group or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                     esc_text = (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                     esc_note = note[:240].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                     table_data.append([
+                        mqid,
                         Paragraph(esc_group, cell_style),
                         Paragraph(esc_text, cell_style),
                         f"{mx:g}",
@@ -1422,7 +1467,7 @@ class PDFExporter:
                         Paragraph(esc_note, cell_style),
                     ])
 
-                tbl = Table(table_data, colWidths=[80, 180, 40, 40, 216], repeatRows=1)
+                tbl = Table(table_data, colWidths=[54, 70, 152, 36, 36, 204], repeatRows=1)
                 tbl.setStyle(TableStyle([
                     ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE5FF")),
                     ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#3B2D5C")),
@@ -1438,7 +1483,7 @@ class PDFExporter:
                 story.append(tbl)
                 story.append(Spacer(1, 10))
 
-            note_row = load_student_note(self.grade_con, sid, qid)
+            note_row = load_student_note(self.grade_con, sid, members[0])
             rationale = note_row[0] if note_row and note_row[0] else ""
             if self.student_pdf_options["include_rationale"] and rationale:
                 story.append(Paragraph("<b>Rationale</b>", styles["Heading3"]))
@@ -1536,8 +1581,9 @@ class PDFExporter:
         students = sorted(students, key=key)
 
         parts = fetch_rubric_parts(self.grade_con)
-        question_ids = fetch_all_question_ids(self.grade_con)
-        headers = ["Student ID", "Name", "LabID"] + [f"{qid}:{ck}" for qid, ck, _g, _t, _m in parts] + [f"{qid}_total" for qid in question_ids] + ["Overall"]
+        q_display_map = build_question_display_map(self.grade_con)
+        question_ids = fetch_display_question_ids(self.grade_con)
+        headers = ["Student ID", "Name", "LabID"] + [f"{q_display_map.get(qid, qid)}:{ck}" for qid, ck, _g, _t, _m in parts] + [f"{qid}_total" for qid in question_ids] + ["Overall"]
         td = [headers]
         for sid, sname, lab in students:
             score_cache = {}
@@ -1548,8 +1594,8 @@ class PDFExporter:
                 val = score_cache[qid].get(ck)
                 row.append("" if val is None else f"{val:g}")
             for qid in question_ids:
-                row.append(f"{compute_total(self.grade_con, sid, qid):g}")
-            overall = compute_overall_total(self.grade_con, sid)
+                row.append(f"{compute_total_by_display_id(self.grade_con, sid, qid):g}")
+            overall = sum(compute_total_by_display_id(self.grade_con, sid, qid) for qid in question_ids)
             row.append(f"{overall:g}")
             td.append(row)
 
@@ -2955,6 +3001,8 @@ class App:
 
         # curve preview factor (histogram overlay)
         self.curve_preview_var = tk.DoubleVar(value=1.0)
+        self.leniency_level_var = tk.DoubleVar(value=0.0)
+        self.leniency_label_var = tk.StringVar(value="Leniency level: 0.00 (strict ↔ lenient)")
 
         # Regex profile state
         self.active_regex_profile_var = tk.StringVar(value="Default")
@@ -3105,6 +3153,7 @@ class App:
         self._ensure_default_regex_profile()
         self.load_gpt_settings()
         self.load_ui_preferences()
+        self._on_leniency_change()
         self.reset_session_timer()
 
     def _build_grade_tab(self):
@@ -3170,7 +3219,7 @@ class App:
         right = ttk.Frame(main, style="PastelCard.TFrame", padding=10)
         right.grid(row=0, column=2, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(14, weight=1)
+        right.rowconfigure(15, weight=1)
 
         ttk.Label(right, text="Questions: all loaded rubric questions", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
         self.question_mode_lbl = ttk.Label(right, text="Rubric below shows all questions (question picker removed)", style="PastelCard.TLabel")
@@ -3186,8 +3235,13 @@ class App:
         self.theme_text.grid(row=6, column=0, sticky="nsew")
         self.theme_text.insert("1.0", DEFAULT_THEME)
 
+        leniency_row = ttk.Frame(right, style="PastelCard.TFrame")
+        leniency_row.grid(row=7, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(leniency_row, textvariable=self.leniency_label_var, style="PastelCard.TLabel").pack(side=tk.LEFT)
+        ttk.Scale(leniency_row, from_=-1.0, to=1.0, variable=self.leniency_level_var, command=lambda _v: self._on_leniency_change()).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(8, 0))
+
         btns = ttk.Frame(right, style="PastelCard.TFrame")
-        btns.grid(row=7, column=0, sticky="ew", pady=(8, 8))
+        btns.grid(row=8, column=0, sticky="ew", pady=(8, 8))
 
         ttk.Button(btns, text="Save Theme", command=self.save_theme).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(btns, text="AutoFill", command=self.auto_fill_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
@@ -3198,27 +3252,30 @@ class App:
         ttk.Button(btns, text="Mark Reviewed", command=self.mark_selected_student_reviewed).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Export Grade (selected student)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
 
-        ttk.Label(right, text="Rationale (applied to all questions for this student)", style="PastelCard.TLabel").grid(row=8, column=0, sticky="w")
+        ttk.Label(right, text="Rationale (applied to all questions for this student)", style="PastelCard.TLabel").grid(row=9, column=0, sticky="w")
         self.rationale_text = tk.Text(right, height=6,
                                       bg="#FFFDF7", fg=self.palette["text"],
                                       insertbackground=self.palette["text"],
                                       highlightthickness=1, highlightbackground="#E8E1FF")
-        self.rationale_text.grid(row=9, column=0, sticky="nsew")
+        self.rationale_text.grid(row=10, column=0, sticky="nsew")
         self.rationale_text.bind("<KeyRelease>", lambda _e: self.schedule_auto_save())
         self.rationale_text.bind("<FocusOut>", lambda _e: self.schedule_auto_save())
 
         self.total_lbl = ttk.Label(right, text="Overall Total: -", style="PastelCard.TLabel", font=("Segoe UI", 11, "bold"))
-        self.total_lbl.grid(row=10, column=0, sticky="w", pady=(6, 6))
+        self.total_lbl.grid(row=11, column=0, sticky="w", pady=(6, 6))
 
-        ttk.Label(right, text="Rubric Table (all questions)", style="PastelCard.TLabel").grid(row=11, column=0, sticky="w")
+        ttk.Label(right, text="Rubric Table (all questions)", style="PastelCard.TLabel").grid(row=12, column=0, sticky="w")
         self.rubric_grid = ScrollableRubricGrid(right)
         self.rubric_grid.set_change_callback(self.schedule_auto_save)
-        self.rubric_grid.grid(row=12, column=0, sticky="nsew")
+        self.rubric_grid.grid(row=13, column=0, sticky="nsew")
 
-        ttk.Label(right, text="Code comments (this file)", style="PastelCard.TLabel").grid(row=13, column=0, sticky="w", pady=(10,0))
+        ttk.Label(right, text="Code comments (this file)", style="PastelCard.TLabel").grid(row=14, column=0, sticky="w", pady=(10,0))
         self.comment_list = tk.Listbox(right, height=7, bg=self.palette["panel"], fg=self.palette["text"],
                                        highlightthickness=0, selectbackground=self.palette["select"])
-        self.comment_list.grid(row=14, column=0, sticky="nsew")
+        self.comment_list.grid(row=15, column=0, sticky="nsew")
+
+    def _on_leniency_change(self):
+        self.leniency_label_var.set(f"Leniency level: {float(self.leniency_level_var.get()):.2f} (strict ↔ lenient)")
 
     def _build_ai_trace_tab(self):
         self.tab_ai_trace.columnconfigure(0, weight=1)
@@ -3473,7 +3530,7 @@ class App:
         ttk.Checkbutton(pdf_box, text="Include student PDF", variable=self.pdf_menu_include_student_var).pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(pdf_box, text="Include summary PDF", variable=self.pdf_menu_include_summary_var).pack(anchor="w")
         ttk.Checkbutton(pdf_box, text="Include all student PDFs", variable=self.pdf_menu_include_batch_var).pack(anchor="w")
-        ttk.Checkbutton(pdf_box, text="Student PDF: write grades table", variable=self.pdf_content_grades_var).pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(pdf_box, text="Student PDF: include scheme/grades table", variable=self.pdf_content_grades_var).pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(pdf_box, text="Student PDF: write rationale", variable=self.pdf_content_rationale_var).pack(anchor="w")
         ttk.Checkbutton(pdf_box, text="Student PDF: write code highlights", variable=self.pdf_content_highlights_var).pack(anchor="w")
         ttk.Checkbutton(pdf_box, text="Student PDF: write full code listing", variable=self.pdf_content_full_code_var).pack(anchor="w")
@@ -3505,6 +3562,7 @@ class App:
             "pdf_content_rationale": bool(self.pdf_content_rationale_var.get()),
             "pdf_content_highlights": bool(self.pdf_content_highlights_var.get()),
             "pdf_content_full_code": bool(self.pdf_content_full_code_var.get()),
+            "leniency_level": float(self.leniency_level_var.get()),
         }
         meta_set(self.grade_con, "ui_preferences", json.dumps(prefs))
         self.refresh_chat_preview()
@@ -3538,6 +3596,11 @@ class App:
         self.pdf_content_rationale_var.set(bool(prefs.get("pdf_content_rationale", True)))
         self.pdf_content_highlights_var.set(bool(prefs.get("pdf_content_highlights", True)))
         self.pdf_content_full_code_var.set(bool(prefs.get("pdf_content_full_code", True)))
+        try:
+            self.leniency_level_var.set(max(-1.0, min(1.0, float(prefs.get("leniency_level", 0.0)))))
+        except Exception:
+            self.leniency_level_var.set(0.0)
+        self._on_leniency_change()
         self.refresh_chat_preview()
 
     def clear_chat_transcript(self):
@@ -3632,7 +3695,7 @@ class App:
 
         content = ttk.LabelFrame(self.tab_pdf_menu, text="Student PDF content", padding=10)
         content.pack(fill=tk.X, pady=(0, 8))
-        ttk.Checkbutton(content, text="Grades table (rubric rows + points + notes)", variable=self.pdf_content_grades_var).pack(anchor="w")
+        ttk.Checkbutton(content, text="Scheme table (rubric rows + points + notes)", variable=self.pdf_content_grades_var).pack(anchor="w")
         ttk.Checkbutton(content, text="Rationale text", variable=self.pdf_content_rationale_var).pack(anchor="w")
         ttk.Checkbutton(content, text="Code comment highlights", variable=self.pdf_content_highlights_var).pack(anchor="w")
         ttk.Checkbutton(content, text="Full code listing", variable=self.pdf_content_full_code_var).pack(anchor="w")
@@ -4068,6 +4131,11 @@ class App:
         theme = meta_get(self.grade_con, "theme", DEFAULT_THEME)
         self.theme_text.delete("1.0", tk.END)
         self.theme_text.insert("1.0", theme)
+        try:
+            self.leniency_level_var.set(max(-1.0, min(1.0, float(meta_get(self.grade_con, "leniency_level", "0") or 0.0))))
+        except Exception:
+            self.leniency_level_var.set(0.0)
+        self._on_leniency_change()
         self.load_gpt_settings()
         self.refresh_question_lists()
 
@@ -4398,6 +4466,7 @@ class App:
                 merged_code=merged_code,
                 rubric_items=rubric_items,
                 theme_text=theme,
+                leniency_level=float(self.leniency_level_var.get()),
             )
             self._capture_auto_grade_trace(qid)
 
@@ -4491,7 +4560,8 @@ class App:
             return
         theme = self.theme_text.get("1.0", tk.END).strip()
         meta_set(self.grade_con, "theme", theme)
-        messagebox.showinfo("Saved", "Theme saved.")
+        meta_set(self.grade_con, "leniency_level", f"{float(self.leniency_level_var.get()):.3f}")
+        messagebox.showinfo("Saved", "Theme + leniency saved.")
 
 
     def reset_session_timer(self):
@@ -4877,7 +4947,7 @@ class App:
 
         try:
             self._refresh_gpt_client()
-            res = self.auto_grader.auto_grade(question_id=self.selected_question_id, question_title=(self.question_map.get(self.selected_question_id, self.selected_question_id) or self.selected_question_id), merged_code=merged_code, rubric_items=rubric_items, theme_text=theme)
+            res = self.auto_grader.auto_grade(question_id=self.selected_question_id, question_title=(self.question_map.get(self.selected_question_id, self.selected_question_id) or self.selected_question_id), merged_code=merged_code, rubric_items=rubric_items, theme_text=theme, leniency_level=float(self.leniency_level_var.get()))
             self._capture_auto_grade_trace(self.selected_question_id)
         except Exception as e:
             messagebox.showerror("Auto grade failed", str(e))
@@ -4971,10 +5041,11 @@ class App:
           WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
         """).fetchall()
         vals = []
+        display_qids = fetch_display_question_ids(self.grade_con)
         for sid, sname in rows:
             if not has_required_student_fields(sid, sname):
                 continue
-            vals.append(compute_overall_total(self.grade_con, sid))
+            vals.append(sum(compute_total_by_display_id(self.grade_con, sid, qid) for qid in display_qids))
         return vals
 
     def compute_class_stats_text(self):
@@ -4990,7 +5061,7 @@ class App:
         q3 = vals[(3*n)//4]
         variance = sum((v - avg) ** 2 for v in vals) / n
         std = math.sqrt(variance)
-        overall_max = sum(compute_question_max(self.grade_con, qid) for qid in fetch_all_question_ids(self.grade_con)) if self.grade_con else 0.0
+        overall_max = sum(compute_question_max(self.grade_con, qid) for qid in fetch_display_question_ids(self.grade_con)) if self.grade_con else 0.0
         zeros = sum(1 for v in vals if v <= 0.0001)
         perfects = sum(1 for v in vals if overall_max > 0 and abs(v - overall_max) < 1e-6)
         target_avg = 75.0
@@ -5042,9 +5113,10 @@ class App:
         for item in self.sum_tree.get_children():
             self.sum_tree.delete(item)
 
-        question_ids = fetch_all_question_ids(self.grade_con)
+        question_ids = fetch_display_question_ids(self.grade_con)
         parts = fetch_rubric_parts(self.grade_con)
-        cols = ["student_id", "student_name", "lab_id"] + [f"{qid}:{ck}" for qid, ck, _g, _t, _m in parts] + [f"{qid}_total" for qid in question_ids] + ["overall", "overall_curved"]
+        q_display_map = build_question_display_map(self.grade_con)
+        cols = ["student_id", "student_name", "lab_id"] + [f"{q_display_map.get(qid, qid)}:{ck}" for qid, ck, _g, _t, _m in parts] + [f"{qid}_total" for qid in question_ids] + ["overall", "overall_curved"]
         self.sum_tree.configure(columns=cols)
         for c in cols:
             self.sum_tree.heading(c, text=c)
@@ -5069,8 +5141,8 @@ class App:
                 v = score_cache[qid].get(ck)
                 row.append("" if v is None else f"{v:g}")
             for qid in question_ids:
-                row.append(f"{compute_total(self.grade_con, sid, qid):g}")
-            overall = compute_overall_total(self.grade_con, sid)
+                row.append(f"{compute_total_by_display_id(self.grade_con, sid, qid):g}")
+            overall = sum(compute_total_by_display_id(self.grade_con, sid, qid) for qid in question_ids)
             row.append(f"{overall:g}")
             row.append(f"{max(0.0, overall * curve_k):.2f}")
             self.sum_tree.insert("", "end", values=row)
