@@ -3330,7 +3330,7 @@ class App:
         btns = ttk.Frame(right, style="PastelCard.TFrame")
         btns.grid(row=8, column=0, sticky="ew", pady=(8, 8))
 
-        ttk.Button(btns, text="Save Theme", command=self.save_theme).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(btns, text="Save Theme", command=lambda: self.save_theme(source="grade")).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(btns, text="AutoFill", command=self.auto_fill_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Auto-Grade Files", command=self.auto_grade_files_for_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Auto-Grade All", command=self.auto_grade_all_students).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
@@ -3361,12 +3361,29 @@ class App:
                                        highlightthickness=0, selectbackground=self.palette["select"])
         self.comment_list.grid(row=15, column=0, sticky="nsew")
 
-    def _current_theme_instructions(self) -> str:
-        theme = (self.theme_text.get("1.0", tk.END).strip() if self.theme_text is not None else "") or DEFAULT_THEME
-        if getattr(self, "theme_settings_text", None) is not None:
-            settings_theme = self.theme_settings_text.get("1.0", tk.END).strip()
-            if settings_theme:
-                theme = settings_theme
+    def _current_theme_instructions(self, source: str = "auto") -> str:
+        grade_theme = self.theme_text.get("1.0", tk.END).strip() if self.theme_text is not None else ""
+        settings_theme = self.theme_settings_text.get("1.0", tk.END).strip() if self.theme_settings_text is not None else ""
+
+        theme = ""
+        if source == "grade":
+            theme = grade_theme or settings_theme
+        elif source == "settings":
+            theme = settings_theme or grade_theme
+        else:
+            focus_widget = self.root.focus_get()
+            if focus_widget is self.theme_settings_text:
+                theme = settings_theme or grade_theme
+            elif focus_widget is self.theme_text:
+                theme = grade_theme or settings_theme
+            elif grade_theme and settings_theme and grade_theme != settings_theme:
+                theme = grade_theme
+            else:
+                theme = grade_theme or settings_theme
+
+        theme = theme or DEFAULT_THEME
+
+        if self.theme_settings_text is not None:
             self.theme_settings_text.delete("1.0", tk.END)
             self.theme_settings_text.insert("1.0", theme)
         if self.theme_text is not None:
@@ -3668,8 +3685,8 @@ class App:
 
         preflight_btns = ttk.Frame(auto_box, style="PastelCard.TFrame")
         preflight_btns.grid(row=4, column=0, sticky="w", pady=(8, 0))
-        ttk.Button(preflight_btns, text="Apply to Grade tab", command=self._current_theme_instructions).pack(side=tk.LEFT)
-        ttk.Button(preflight_btns, text="Save theme + leniency", command=self.save_theme).pack(side=tk.LEFT, padx=6)
+        ttk.Button(preflight_btns, text="Apply to Grade tab", command=lambda: self._current_theme_instructions(source="settings")).pack(side=tk.LEFT)
+        ttk.Button(preflight_btns, text="Save theme + leniency", command=lambda: self.save_theme(source="settings")).pack(side=tk.LEFT, padx=6)
 
         btns = ttk.Frame(wrap, style="Pastel.TFrame")
         btns.grid(row=3, column=0, sticky="w", pady=(8, 0))
@@ -4711,10 +4728,10 @@ class App:
             messagebox.showinfo("Auto-Grade All", f"Draft grading complete for {len(student_ids)} students. Please review.")
 
     # ---- theme ----
-    def save_theme(self):
+    def save_theme(self, source: str = "auto"):
         if not self.require_grading_db():
             return
-        theme = self._current_theme_instructions()
+        theme = self._current_theme_instructions(source=source)
         meta_set(self.grade_con, "theme", theme)
         meta_set(self.grade_con, "leniency_level", f"{float(self.leniency_level_var.get()):.3f}")
         messagebox.showinfo("Saved", "Theme + leniency saved.")
