@@ -3241,11 +3241,6 @@ class App:
         self.chat_message_widget = tk.Text(composer, height=3, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
         self.chat_message_widget.grid(row=6, column=0, sticky="ew", pady=(4, 6))
 
-        composer = ttk.Frame(right, style="PastelCard.TFrame")
-        composer.grid(row=2, column=0, sticky="ew")
-        composer.columnconfigure(0, weight=1)
-        self.chat_message_widget = tk.Text(composer, height=4, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
-        self.chat_message_widget.grid(row=0, column=0, sticky="ew")
         chat_btns = ttk.Frame(composer, style="PastelCard.TFrame")
         chat_btns.grid(row=7, column=0, sticky="w", pady=(0, 6))
         ttk.Button(chat_btns, text="Send", command=self.send_chat_message).pack(side=tk.LEFT)
