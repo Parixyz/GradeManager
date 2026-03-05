@@ -111,6 +111,18 @@ def extract_numeric_id(raw: str) -> str:
     m = ID_DIGITS_RE.search(text)
     return m.group(0) if m else ""
 
+
+def normalize_student_id(student_id: str) -> str:
+    """
+    Normalize IDs for matching across LMS exports/DB values.
+    Keeps only digits and removes insignificant leading zeros.
+    """
+    sid = extract_numeric_id(student_id)
+    if not sid:
+        return ""
+    sid = sid.lstrip("0")
+    return sid or "0"
+
 def is_full_student(student_id: str) -> bool:
     return (student_id or "").strip().lower() == "full"
 
@@ -4146,7 +4158,7 @@ class App:
         overall_max = sum(qmax.values())
 
         db_students = {
-            sid: sname
+            normalize_student_id(sid): sname
             for sid, sname in self.sub_con.execute(
                 """
                 SELECT student_id, student_name
@@ -4160,7 +4172,7 @@ class App:
         unmatched: list[str] = []
         matched_rows = 0
         for row in self.upload_rows:
-            sid = extract_numeric_id(str(row.get(id_col, "")))
+            sid = normalize_student_id(str(row.get(id_col, "")))
             if not sid or sid not in db_students:
                 if sid:
                     unmatched.append(sid)
