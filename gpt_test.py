@@ -135,3 +135,71 @@ class GPT_test:
             raise RuntimeError(f"GPT returned invalid JSON: {e}")
         self.last_result = parsed
         return parsed
+
+    def chat(self, *, message: str, context_bundle: str = "") -> str:
+        """
+        Lightweight chat helper for the UI.
+        - Offline mode: returns a concise, deterministic helper response.
+        - Online mode: calls the Responses API using the configured model.
+        """
+        clean_msg = (message or "").strip()
+        clean_ctx = (context_bundle or "").strip()
+        if not clean_msg:
+            return "Please enter a message first."
+
+        if not self.api_key:
+            # Quiet local-mode response: avoid noisy status text in chat transcript.
+            if not clean_ctx:
+                return f"Got it. You said: {clean_msg[:300]}"
+
+            ctx_lines = [ln.strip() for ln in clean_ctx.splitlines() if ln.strip()]
+            signal = []
+            for ln in ctx_lines:
+                low = ln.lower()
+                if low.startswith("# student:") or low.startswith("# rubric") or low.startswith("# my message"):
+                    signal.append(ln)
+                if len(signal) >= 3:
+                    break
+
+            if signal:
+                return "I used your local bundle context:\n- " + "\n- ".join(signal) + f"\n\nReply: {clean_msg[:300]}"
+            return f"I read your bundle ({len(ctx_lines)} non-empty lines). Reply: {clean_msg[:300]}"
+
+        user_payload = {
+            "message": clean_msg,
+            "context_bundle": clean_ctx,
+            "instructions": "Answer clearly and concisely. If context_bundle is provided, use it.",
+        }
+        req_body = json.dumps({
+            "model": self.model,
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": self.system_prompt or "You are a grading assistant."}]},
+                {"role": "user", "content": [{"type": "input_text", "text": json.dumps(user_payload)}]},
+            ],
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/responses",
+            data=req_body,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=45) as resp:
+                payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"Chat request failed: {e.code} {detail[:300]}")
+        except Exception as e:
+            raise RuntimeError(f"Chat request failed: {e}")
+
+        text = payload.get("output_text", "").strip()
+        if text:
+            return text
+        try:
+            return payload["output"][0]["content"][0]["text"].strip()
+        except Exception:
+            return "Model returned no text."
