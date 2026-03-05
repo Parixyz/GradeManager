@@ -1411,6 +1411,12 @@ class PDFExporter:
                 end_off = self._tk_index_to_offset(line_starts, code_len, eidx)
                 if end_off < start_off:
                     start_off, end_off = end_off, start_off
+
+                while start_off < end_off and code[start_off].isspace():
+                    start_off += 1
+                while end_off > start_off and code[end_off - 1].isspace():
+                    end_off -= 1
+
                 if start_off == end_off:
                     continue
                 normalized_ranges.append((start_off, end_off))
@@ -5013,6 +5019,10 @@ class App:
 
         comments = fetch_code_comments_for_file(self.grade_con, self.selected_student_id, self.selected_file_path)
         for cid, sidx, eidx, text, color, _created_at in comments:
+            trimmed = self._trim_preview_range(sidx, eidx)
+            if not trimmed:
+                continue
+            sidx, eidx = trimmed
             tag = "comment_highlight"
             if color:
                 try:
@@ -5024,6 +5034,23 @@ class App:
             except Exception:
                 pass
             self.comment_list.insert(tk.END, f"#{cid} {_format_comment_range_label(sidx, eidx)}: {text}")
+
+    def _trim_preview_range(self, sidx: str, eidx: str):
+        try:
+            selected_text = self.preview.get(sidx, eidx)
+        except Exception:
+            return None
+        if not selected_text:
+            return None
+
+        left_trim = len(selected_text) - len(selected_text.lstrip())
+        right_trim = len(selected_text) - len(selected_text.rstrip())
+        if left_trim + right_trim >= len(selected_text):
+            return None
+
+        trimmed_start = self.preview.index(f"{sidx}+{left_trim}c") if left_trim else sidx
+        trimmed_end = self.preview.index(f"{eidx}-{right_trim}c") if right_trim else eidx
+        return trimmed_start, trimmed_end
 
     def add_comment_to_selection(self):
         if not self.require_grading_db():
@@ -5037,6 +5064,12 @@ class App:
         except Exception:
             messagebox.showinfo("Select", "Highlight a region of code first.")
             return
+
+        trimmed = self._trim_preview_range(sidx, eidx)
+        if not trimmed:
+            messagebox.showinfo("Select", "Selection only contains whitespace. Highlight code text first.")
+            return
+        sidx, eidx = trimmed
 
         txt = simpledialog.askstring("Add comment", "Comment for highlighted code:")
         if not txt:
