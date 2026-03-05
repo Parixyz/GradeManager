@@ -3055,7 +3055,6 @@ class App:
         self.tab_regex = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_ai_trace = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_db = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
-        self.tab_settings = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
 
         self.nb.add(self.tab_grade, text="Grade")
         self.nb.add(self.tab_summary, text="Summary")
@@ -3064,7 +3063,6 @@ class App:
         self.nb.add(self.tab_regex, text="Regex / Patterns")
         self.nb.add(self.tab_ai_trace, text="AI Prompt + Chat")
         self.nb.add(self.tab_db, text="DB Browser")
-        self.nb.add(self.tab_settings, text="Settings")
 
         self._build_grade_tab()
         self._build_summary_tab()
@@ -3073,7 +3071,6 @@ class App:
         self._build_regex_tab()
         self._build_ai_trace_tab()
         self._build_db_tab()
-        self._build_settings_tab()
         self._ensure_default_regex_profile()
         self.load_gpt_settings()
         self.reset_session_timer()
@@ -3193,61 +3190,86 @@ class App:
     def _build_ai_trace_tab(self):
         self.tab_ai_trace.columnconfigure(0, weight=1)
         self.tab_ai_trace.rowconfigure(1, weight=1)
-        self.tab_ai_trace.rowconfigure(3, weight=1)
 
         top = ttk.Frame(self.tab_ai_trace, style="Pastel.TFrame")
         top.grid(row=0, column=0, sticky="ew")
-        ttk.Label(top, text="Prompt process + model output", style="Pastel.TLabel", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        ttk.Label(top, text="Prompt process + model output + chat", style="Pastel.TLabel", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
         ttk.Button(top, text="Refresh from last auto-grade", command=self.refresh_prompt_trace_tab).pack(side=tk.LEFT, padx=8)
 
-        process_box = ttk.Frame(self.tab_ai_trace, style="PastelCard.TFrame", padding=8)
-        process_box.grid(row=1, column=0, sticky="nsew", pady=(8, 6))
+        panes = ttk.Panedwindow(self.tab_ai_trace, orient=tk.HORIZONTAL)
+        panes.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+
+        left = ttk.Frame(panes, style="Pastel.TFrame", padding=(0, 0, 8, 0))
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(1, weight=1)
+        left.rowconfigure(3, weight=1)
+        left.rowconfigure(5, weight=2)
+
+        process_box = ttk.Frame(left, style="PastelCard.TFrame", padding=8)
+        process_box.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
         process_box.columnconfigure(0, weight=1)
         process_box.rowconfigure(1, weight=1)
         ttk.Label(process_box, text="Prompt process", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
-        self.prompt_process_text_widget = tk.Text(process_box, height=10, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.prompt_process_text_widget = tk.Text(process_box, height=8, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
         self.prompt_process_text_widget.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
 
-        result_box = ttk.Frame(self.tab_ai_trace, style="PastelCard.TFrame", padding=8)
-        result_box.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
+        result_box = ttk.Frame(left, style="PastelCard.TFrame", padding=8)
+        result_box.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
         result_box.columnconfigure(0, weight=1)
         result_box.rowconfigure(1, weight=1)
         ttk.Label(result_box, text="What the grader returned", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
-        self.prompt_result_text_widget = tk.Text(result_box, height=9, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.prompt_result_text_widget = tk.Text(result_box, height=6, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
         self.prompt_result_text_widget.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
 
-        composer = ttk.Frame(self.tab_ai_trace, style="PastelCard.TFrame", padding=8)
-        composer.grid(row=3, column=0, sticky="nsew")
-        composer.columnconfigure(0, weight=1)
-        composer.rowconfigure(8, weight=1)
-        ttk.Label(composer, text="Chat helper + Chatbox", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
-        checks = ttk.Frame(composer, style="PastelCard.TFrame")
+        bundle_box = ttk.Frame(left, style="PastelCard.TFrame", padding=8)
+        bundle_box.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
+        bundle_box.columnconfigure(0, weight=1)
+        bundle_box.rowconfigure(2, weight=1)
+        ttk.Label(bundle_box, text="Bundle builder", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        checks = ttk.Frame(bundle_box, style="PastelCard.TFrame")
         checks.grid(row=1, column=0, sticky="w", pady=(4, 6))
         ttk.Checkbutton(checks, text="Include student code", variable=self.chat_include_code_var).pack(side=tk.LEFT)
         ttk.Checkbutton(checks, text="Include rubric scheme", variable=self.chat_include_scheme_var).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Checkbutton(checks, text="Include prompt process + output", variable=self.chat_include_prompt_var).pack(side=tk.LEFT, padx=(10, 0))
 
-        ttk.Label(composer, text="Bundle payload (editable)", style="PastelCard.TLabel").grid(row=2, column=0, sticky="w")
-        self.chat_bundle_widget = tk.Text(composer, height=6, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
-        self.chat_bundle_widget.grid(row=3, column=0, sticky="ew", pady=(4, 6))
+        self.chat_bundle_widget = tk.Text(bundle_box, height=10, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.chat_bundle_widget.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
 
-        bundle_btns = ttk.Frame(composer, style="PastelCard.TFrame")
-        bundle_btns.grid(row=4, column=0, sticky="w", pady=(0, 6))
+        bundle_btns = ttk.Frame(bundle_box, style="PastelCard.TFrame")
+        bundle_btns.grid(row=3, column=0, sticky="w")
         ttk.Button(bundle_btns, text="Build bundle", command=self.refresh_chat_preview).pack(side=tk.LEFT)
         ttk.Button(bundle_btns, text="Copy bundle", command=self.copy_chat_bundle).pack(side=tk.LEFT, padx=6)
         ttk.Checkbutton(bundle_btns, text="Auto-refresh bundle", variable=self.chat_auto_bundle_var).pack(side=tk.LEFT, padx=(6, 0))
 
-        ttk.Label(composer, text="Your chat message", style="PastelCard.TLabel").grid(row=5, column=0, sticky="w")
-        self.chat_message_widget = tk.Text(composer, height=3, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
-        self.chat_message_widget.grid(row=6, column=0, sticky="ew", pady=(4, 6))
+        settings_box = ttk.Frame(left, style="PastelCard.TFrame", padding=8)
+        settings_box.grid(row=3, column=0, sticky="nsew")
+        settings_box.columnconfigure(0, weight=1)
+        self._build_settings_tab(parent=settings_box)
 
-        chat_btns = ttk.Frame(composer, style="PastelCard.TFrame")
-        chat_btns.grid(row=7, column=0, sticky="w", pady=(0, 6))
+        right = ttk.Frame(panes, style="Pastel.TFrame", padding=(8, 0, 0, 0))
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+
+        chat_box = ttk.Frame(right, style="PastelCard.TFrame", padding=10)
+        chat_box.grid(row=0, column=0, sticky="nsew")
+        chat_box.columnconfigure(0, weight=1)
+        chat_box.rowconfigure(1, weight=1)
+        ttk.Label(chat_box, text="Chat", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+
+        self.chat_transcript_widget = tk.Text(chat_box, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.chat_transcript_widget.grid(row=1, column=0, sticky="nsew", pady=(4, 8))
+
+        ttk.Label(chat_box, text="Your message", style="PastelCard.TLabel").grid(row=2, column=0, sticky="w")
+        self.chat_message_widget = tk.Text(chat_box, height=4, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.chat_message_widget.grid(row=3, column=0, sticky="ew", pady=(4, 6))
+
+        chat_btns = ttk.Frame(chat_box, style="PastelCard.TFrame")
+        chat_btns.grid(row=4, column=0, sticky="w")
         ttk.Button(chat_btns, text="Send", command=self.send_chat_message).pack(side=tk.LEFT)
         ttk.Button(chat_btns, text="Clear chat", command=self.clear_chat_transcript).pack(side=tk.LEFT, padx=6)
 
-        self.chat_transcript_widget = tk.Text(composer, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
-        self.chat_transcript_widget.grid(row=8, column=0, sticky="nsew")
+        panes.add(left, weight=3)
+        panes.add(right, weight=2)
 
         self.chat_preview_widget = self.chat_bundle_widget
         self.refresh_prompt_trace_tab()
@@ -3692,8 +3714,9 @@ class App:
         sub_meta_set(self.sub_con, "active_regex_payload", json.dumps(self._current_regex_payload_from_editor()))
         messagebox.showinfo("Committed", f"Committed regex profile for scans: {name}")
 
-    def _build_settings_tab(self):
-        box = ttk.Frame(self.tab_settings, style="PastelCard.TFrame", padding=12)
+    def _build_settings_tab(self, parent=None):
+        container = parent if parent is not None else self.tab_ai_trace
+        box = ttk.Frame(container, style="PastelCard.TFrame", padding=12)
         box.pack(fill=tk.BOTH, expand=True)
         box.columnconfigure(1, weight=1)
 
