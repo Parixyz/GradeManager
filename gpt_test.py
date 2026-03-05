@@ -55,7 +55,7 @@ class GPT_test:
         theme_note = (extra_prompt or "").strip()
         rationale = f"Feedback summary for {question_id} ({question_title or question_id}) based on rubric criteria and code evidence."
         if theme_note:
-            rationale += f" Theme applied: {theme_note[:240]}"
+            rationale += " Grading decisions were aligned with the configured scoring guidance while staying grounded in rubric evidence."
         comments = []
         for idx, ln in enumerate((code_text or "").splitlines(), start=1):
             low = ln.lower()
@@ -136,7 +136,7 @@ class GPT_test:
                 "Apply the theme/instructions first before any scoring."
                 + "\n"
                 + (extra_prompt or "")
-                + "\nIn the rationale, explicitly explain how the theme/instructions affected the grading decisions."
+                + "\nIn the rationale, reflect those instructions implicitly through grading logic without naming or quoting the theme/instructions."
                 + "\n"
                 + (self.system_prompt or "Grade code strictly but fairly.")
                 + f"\nLeniency level: {float(leniency_level or 0.0):.2f} (-1 strict, +1 lenient)."
