@@ -2959,6 +2959,13 @@ class App:
         self.chat_include_code_var = tk.BooleanVar(value=True)
         self.chat_include_scheme_var = tk.BooleanVar(value=True)
         self.chat_include_prompt_var = tk.BooleanVar(value=True)
+        self.chat_compact_code_var = tk.BooleanVar(value=True)
+        self.chat_code_char_limit_var = tk.IntVar(value=7000)
+        self.chat_student_var = tk.StringVar(value="Chat student: none selected")
+        self.pdf_menu_include_student_var = tk.BooleanVar(value=True)
+        self.pdf_menu_include_summary_var = tk.BooleanVar(value=True)
+        self.pdf_menu_include_batch_var = tk.BooleanVar(value=False)
+        self.pdf_menu_batch_tag_var = tk.StringVar(value="Midterm")
         self.last_auto_grade_trace = {"prompt": "", "result": "", "source": ""}
 
         self.db_table_pick_var = tk.StringVar(value="")
@@ -3054,6 +3061,7 @@ class App:
         self.tab_progress = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_regex = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_ai_trace = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
+        self.tab_pdf_menu = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_db = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
 
         self.nb.add(self.tab_grade, text="Grade")
@@ -3062,6 +3070,7 @@ class App:
         self.nb.add(self.tab_progress, text="Progress")
         self.nb.add(self.tab_regex, text="Regex / Patterns")
         self.nb.add(self.tab_ai_trace, text="AI Prompt + Chat")
+        self.nb.add(self.tab_pdf_menu, text="PDF Menu")
         self.nb.add(self.tab_db, text="DB Browser")
 
         self._build_grade_tab()
@@ -3070,6 +3079,7 @@ class App:
         self._build_progress_tab()
         self._build_regex_tab()
         self._build_ai_trace_tab()
+        self._build_pdf_menu_tab()
         self._build_db_tab()
         self._ensure_default_regex_profile()
         self.load_gpt_settings()
@@ -3160,6 +3170,7 @@ class App:
         ttk.Button(btns, text="Save Theme", command=self.save_theme).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(btns, text="AutoFill", command=self.auto_fill_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Auto-Grade Files", command=self.auto_grade_files_for_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(btns, text="Auto-Grade All", command=self.auto_grade_all_students).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Clear Grade", command=self.clear_selected_student_grade).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Save (all questions)", command=self.save_scores_and_rationale).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Mark Reviewed", command=self.mark_selected_student_reviewed).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
@@ -3194,6 +3205,7 @@ class App:
         top = ttk.Frame(self.tab_ai_trace, style="Pastel.TFrame")
         top.grid(row=0, column=0, sticky="ew")
         ttk.Label(top, text="Prompt process + model output + chat", style="Pastel.TLabel", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        ttk.Label(top, textvariable=self.chat_student_var, style="Pastel.TLabel").pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(top, text="Refresh from last auto-grade", command=self.refresh_prompt_trace_tab).pack(side=tk.LEFT, padx=8)
 
         panes = ttk.Panedwindow(self.tab_ai_trace, orient=tk.HORIZONTAL)
@@ -3231,6 +3243,9 @@ class App:
         ttk.Checkbutton(checks, text="Include student code", variable=self.chat_include_code_var).pack(side=tk.LEFT)
         ttk.Checkbutton(checks, text="Include rubric scheme", variable=self.chat_include_scheme_var).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Checkbutton(checks, text="Include prompt process + output", variable=self.chat_include_prompt_var).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Checkbutton(checks, text="Compact code", variable=self.chat_compact_code_var).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(checks, text="Code chars", style="PastelCard.TLabel").pack(side=tk.LEFT, padx=(10, 4))
+        ttk.Entry(checks, textvariable=self.chat_code_char_limit_var, width=8).pack(side=tk.LEFT)
 
         self.chat_bundle_widget = tk.Text(bundle_box, height=10, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
         self.chat_bundle_widget.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
@@ -3265,7 +3280,8 @@ class App:
 
         chat_btns = ttk.Frame(chat_box, style="PastelCard.TFrame")
         chat_btns.grid(row=4, column=0, sticky="w")
-        ttk.Button(chat_btns, text="Send", command=self.send_chat_message).pack(side=tk.LEFT)
+        ttk.Button(chat_btns, text="Send message", command=self.send_chat_message).pack(side=tk.LEFT)
+        ttk.Button(chat_btns, text="Send bundle", command=self.send_bundle_message).pack(side=tk.LEFT, padx=6)
         ttk.Button(chat_btns, text="Clear chat", command=self.clear_chat_transcript).pack(side=tk.LEFT, padx=6)
 
         panes.add(left, weight=3)
@@ -3306,11 +3322,22 @@ class App:
             lines.append(f"- {qid} | {col_key} | {group or '-'} | max {col_max:g} | {col_text}")
         return "\n".join(lines)
 
+    def _selected_student_label(self):
+        if not self.selected_student_id:
+            return "none selected"
+        row = self.sub_con.execute("SELECT COALESCE(student_name,'') FROM students WHERE student_id=?", (self.selected_student_id,)).fetchone()
+        name = (row[0] or "").strip() if row else ""
+        return f"{self.selected_student_id} — {name}" if name else self.selected_student_id
+
     def _build_code_bundle_text(self):
         if not self.selected_student_id:
             return ""
         merged_code, _ = self._merged_code_and_file_map(self.selected_student_id)
-        header = f"# Student: {self.selected_student_id}\n"
+        max_chars = max(1000, int(self.chat_code_char_limit_var.get() or 7000))
+        compact = bool(self.chat_compact_code_var.get())
+        if compact and len(merged_code) > max_chars:
+            merged_code = merged_code[:max_chars] + "\n\n// [truncated for token efficiency]"
+        header = f"# Student: {self._selected_student_label()}\n"
         return header + merged_code
 
     def _compose_chat_bundle(self):
@@ -3357,26 +3384,34 @@ class App:
         self.chat_transcript_widget.insert(tk.END, f"[{stamp}] {role}\n{text.strip()}\n\n")
         self.chat_transcript_widget.see(tk.END)
 
+    def _send_to_chat(self, message: str, context_bundle: str, show_label: str):
+        self._append_chat_transcript(show_label, message)
+        try:
+            reply = self.gpt_tester.chat(message=message, context_bundle=context_bundle)
+        except Exception as exc:
+            reply = f"Chat failed: {exc}"
+        self._append_chat_transcript("Assistant", reply)
+
     def send_chat_message(self):
         msg = self.chat_message_widget.get("1.0", tk.END).strip() if self.chat_message_widget else ""
         if not msg:
             messagebox.showinfo("Missing", "Type a chat message first.")
             return
-
         if self.chat_auto_bundle_var.get():
             self.refresh_chat_preview()
-
         bundle = self.chat_bundle_widget.get("1.0", tk.END).strip() if self.chat_bundle_widget else ""
-        self._append_chat_transcript("You", msg)
-
-        try:
-            reply = self.gpt_tester.chat(message=msg, context_bundle=bundle)
-        except Exception as exc:
-            reply = f"Chat failed: {exc}"
-
-        self._append_chat_transcript("Assistant", reply)
+        self._send_to_chat(msg, bundle, "You")
         if self.chat_message_widget is not None:
             self.chat_message_widget.delete("1.0", tk.END)
+
+    def send_bundle_message(self):
+        if self.chat_auto_bundle_var.get():
+            self.refresh_chat_preview()
+        bundle = self.chat_bundle_widget.get("1.0", tk.END).strip() if self.chat_bundle_widget else ""
+        if not bundle:
+            messagebox.showinfo("Missing", "Build a bundle first.")
+            return
+        self._send_to_chat(bundle, "", "You (bundle)")
 
     def clear_chat_transcript(self):
         if self.chat_transcript_widget is not None:
@@ -3400,6 +3435,7 @@ class App:
 
         self.load_student_question_view()
         self.refresh_summary()
+        self.refresh_chat_preview()
         self.refresh_progress_tab()
         self.refresh_prompt_trace_tab()
         self.refresh_chat_preview()
@@ -3455,6 +3491,49 @@ class App:
         )
         note.pack(anchor="w", pady=(8,0))
 
+
+    def _build_pdf_menu_tab(self):
+        top = ttk.Frame(self.tab_pdf_menu, style="Pastel.TFrame")
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="PDF export menu", style="Pastel.TLabel", font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT)
+
+        opts = ttk.Frame(self.tab_pdf_menu, style="PastelCard.TFrame", padding=10)
+        opts.pack(fill=tk.X, pady=(10, 8))
+        ttk.Checkbutton(opts, text="Include student PDF", variable=self.pdf_menu_include_student_var).pack(anchor="w")
+        ttk.Checkbutton(opts, text="Include summary PDF", variable=self.pdf_menu_include_summary_var).pack(anchor="w")
+        ttk.Checkbutton(opts, text="Include batch PDFs", variable=self.pdf_menu_include_batch_var).pack(anchor="w")
+
+        tag_row = ttk.Frame(opts, style="PastelCard.TFrame")
+        tag_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(tag_row, text="Batch report tag", style="PastelCard.TLabel").pack(side=tk.LEFT)
+        ttk.Entry(tag_row, textvariable=self.pdf_menu_batch_tag_var, width=20).pack(side=tk.LEFT, padx=(8, 0))
+
+        btns = ttk.Frame(self.tab_pdf_menu, style="Pastel.TFrame")
+        btns.pack(fill=tk.X)
+        ttk.Button(btns, text="Run selected exports", command=self.run_pdf_menu_exports).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Export Student PDF", command=self.export_student_pdf).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="Export Summary PDF", command=self.export_summary_pdf).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="Export All Student PDFs", command=self.export_all_students_pdfs).pack(side=tk.LEFT, padx=6)
+
+        ttk.Label(
+            self.tab_pdf_menu,
+            text="Tick the outputs you want, then run once. This keeps PDF flow quick and untickable.",
+            style="Pastel.TLabel"
+        ).pack(anchor="w", pady=(8, 0))
+
+    def run_pdf_menu_exports(self):
+        ran_any = False
+        if self.pdf_menu_include_student_var.get():
+            ran_any = True
+            self.export_student_pdf()
+        if self.pdf_menu_include_summary_var.get():
+            ran_any = True
+            self.export_summary_pdf()
+        if self.pdf_menu_include_batch_var.get():
+            ran_any = True
+            self.export_all_students_pdfs(report_tag_override=self.pdf_menu_batch_tag_var.get().strip())
+        if not ran_any:
+            messagebox.showinfo("PDF Menu", "Tick at least one PDF export option.")
 
     def _build_progress_tab(self):
         top = ttk.Frame(self.tab_progress, style="Pastel.TFrame")
@@ -4173,6 +4252,50 @@ class App:
         self.refresh_progress_tab()
         messagebox.showinfo("AutoFill", "AutoFill applied across all rubric rows. Mark reviewed after checking.")
 
+    def _auto_grade_one_student(self, sid: str, qids: list[str], theme: str):
+        merged_code, file_map = self._merged_code_and_file_map(sid)
+        for qid in qids:
+            cols = fetch_columns_for_question(self.grade_con, qid)
+            rubric_items = [{"col_key": col_key, "group": (group or ""), "criterion": text, "min_points": 0.0, "max_points": float(mx)}
+                            for col_key, group, text, mx in cols]
+            res = self.auto_grader.auto_grade(
+                question_id=qid,
+                question_title=(self.question_map.get(qid, qid) or qid),
+                merged_code=merged_code,
+                rubric_items=rubric_items,
+                theme_text=theme,
+            )
+            self._capture_auto_grade_trace(qid)
+
+            score_map = {x.get("col_key"): x.get("points", 0.0) for x in res.get("scores", []) if x.get("col_key")}
+            note_map = {x.get("col_key"): x.get("note", "") for x in res.get("scores", []) if x.get("col_key")}
+            max_map = {k: float(mx) for (k, _g, _t, mx) in cols}
+            for col_key in max_map.keys():
+                pts = float(score_map.get(col_key, 0.0))
+                pts = clamp_points(pts, max_map[col_key])
+                upsert_score(self.grade_con, sid, qid, col_key, pts, note_map.get(col_key, ""), commit=False)
+
+            rationale = (res.get("rationale") or "").strip() or f"Draft feedback for {qid}."
+            total_q = compute_total(self.grade_con, sid, qid)
+            upsert_student_note(self.grade_con, sid, qid, rationale, overall_grade=total_q, commit=False)
+
+            for c in (res.get("comments") or []):
+                try:
+                    line_no = int(c.get("line", 1))
+                except Exception:
+                    line_no = 1
+                txt = (c.get("comment") or "").strip()
+                if not txt:
+                    continue
+                for fp, content in file_map.items():
+                    if not content:
+                        continue
+                    sidx, eidx = self._line_to_index(content, line_no)
+                    add_code_comment(self.grade_con, sid, fp, sidx, eidx, f"[{qid}] {txt}", color="#FFE8A3")
+                    break
+
+        upsert_grading_progress(self.grade_con, sid, self.selected_question_id, mark_graded=True, reviewed=False, commit=False)
+
     def auto_grade_files_for_student(self):
         if not self.require_grading_db():
             return
@@ -4185,55 +4308,48 @@ class App:
             messagebox.showinfo("Missing", "Load a rubric scheme first.")
             return
 
-        merged_code, file_map = self._merged_code_and_file_map(self.selected_student_id)
         theme = self.theme_text.get("1.0", tk.END).strip()
-
-        with self.grade_con:
-            for qid in qids:
-                cols = fetch_columns_for_question(self.grade_con, qid)
-                rubric_items = [{"col_key": col_key, "group": (group or ""), "criterion": text, "min_points": 0.0, "max_points": float(mx)}
-                                for col_key, group, text, mx in cols]
-                try:
-                    res = self.auto_grader.auto_grade(question_id=qid, question_title=(self.question_map.get(qid, qid) or qid), merged_code=merged_code, rubric_items=rubric_items, theme_text=theme)
-                    self._capture_auto_grade_trace(qid)
-                except Exception as e:
-                    messagebox.showerror("Auto grade failed", f"Question {qid}: {e}")
-                    return
-
-                score_map = {x.get("col_key"): x.get("points", 0.0) for x in res.get("scores", []) if x.get("col_key")}
-                note_map = {x.get("col_key"): x.get("note", "") for x in res.get("scores", []) if x.get("col_key")}
-                max_map = {k: float(mx) for (k, _g, _t, mx) in cols}
-                for col_key in max_map.keys():
-                    pts = float(score_map.get(col_key, 0.0))
-                    pts = clamp_points(pts, max_map[col_key])
-                    upsert_score(self.grade_con, self.selected_student_id, qid, col_key, pts, note_map.get(col_key, ""), commit=False)
-
-                rationale = (res.get("rationale") or "").strip() or f"Draft feedback for {qid}."
-                total_q = compute_total(self.grade_con, self.selected_student_id, qid)
-                upsert_student_note(self.grade_con, self.selected_student_id, qid, rationale, overall_grade=total_q, commit=False)
-
-                # save line-based code comments/highlights
-                for c in (res.get("comments") or []):
-                    try:
-                        line_no = int(c.get("line", 1))
-                    except Exception:
-                        line_no = 1
-                    txt = (c.get("comment") or "").strip()
-                    if not txt:
-                        continue
-                    for fp, content in file_map.items():
-                        if not content:
-                            continue
-                        sidx, eidx = self._line_to_index(content, line_no)
-                        add_code_comment(self.grade_con, self.selected_student_id, fp, sidx, eidx, f"[{qid}] {txt}", color="#FFE8A3")
-                        break
-
-            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=True, reviewed=False, commit=False)
+        try:
+            with self.grade_con:
+                self._auto_grade_one_student(self.selected_student_id, qids, theme)
+        except Exception as e:
+            messagebox.showerror("Auto grade failed", str(e))
+            return
 
         self.load_student_question_view()
         self.refresh_summary()
         self.refresh_progress_tab()
-        messagebox.showinfo("Auto-Grade Files", "Draft grading complete for all questions, with rationale, notes, and code comments. Please review.")
+        messagebox.showinfo("Auto-Grade Files", "Draft grading complete for this student. Please review.")
+
+    def auto_grade_all_students(self):
+        if not self.require_grading_db():
+            return
+        qids = self._all_question_ids()
+        if not qids:
+            messagebox.showinfo("Missing", "Load a rubric scheme first.")
+            return
+        rows = self.sub_con.execute("SELECT student_id FROM students WHERE include_in_summary=1 ORDER BY student_id").fetchall()
+        student_ids = [r[0] for r in rows if r and r[0]]
+        if not student_ids:
+            messagebox.showinfo("Missing", "No included students found.")
+            return
+
+        theme = self.theme_text.get("1.0", tk.END).strip()
+        failed = []
+        with self.grade_con:
+            for sid in student_ids:
+                try:
+                    self._auto_grade_one_student(sid, qids, theme)
+                except Exception as exc:
+                    failed.append(f"{sid}: {exc}")
+
+        self.load_student_question_view()
+        self.refresh_summary()
+        self.refresh_progress_tab()
+        if failed:
+            messagebox.showwarning("Auto-Grade All", "Completed with some errors\n" + "\n".join(failed[:8]))
+        else:
+            messagebox.showinfo("Auto-Grade All", f"Draft grading complete for {len(student_ids)} students. Please review.")
 
     # ---- theme ----
     def save_theme(self):
@@ -4411,9 +4527,11 @@ class App:
             self.student_list.see(idx)
         else:
             self.selected_student_id = None
+            self.chat_student_var.set("Chat student: none selected")
             self.grade_meta_var.set("Graded: NO | Reviewed: YES | First graded: - | Last updated: -")
 
         self.refresh_progress_tab()
+        self.refresh_chat_preview()
 
     def on_student_select(self, _evt=None):
         sel = self.student_list.curselection()
@@ -4427,6 +4545,7 @@ class App:
         lab = row[1] if row else ""
         lab_txt = f" | Lab:{lab}" if lab else ""
         self.student_header.config(text=f"{sid} — {name}{lab_txt}")
+        self.chat_student_var.set(f"Chat student: {sid} — {name}" if name else f"Chat student: {sid}")
         graded, reviewed, first_g, last_u, last_q = load_grading_progress(self.grade_con, sid)
         self.grade_meta_var.set(
             f"Graded: {'YES' if int(graded or 0)==1 else 'NO'} | Reviewed: {'YES' if int(reviewed or 0)==1 else 'NO'} | First graded: {first_g or '-'} | Last updated: {last_u or '-'} | Last question: {last_q or '-'}"
@@ -4446,6 +4565,7 @@ class App:
 
         self.load_student_question_view()
         self.refresh_summary()
+        self.refresh_chat_preview()
 
     def on_grade_file_select(self, _evt=None):
         sel = self.file_list.curselection()
@@ -4878,7 +4998,7 @@ class App:
             return
         messagebox.showinfo("PDF exported", f"Saved:\n{out}")
 
-    def export_all_students_pdfs(self):
+    def export_all_students_pdfs(self, report_tag_override: str | None = None):
         if not self.require_grading_db():
             return
         if SimpleDocTemplate is None:
@@ -4889,13 +5009,16 @@ class App:
         if not out_dir:
             return
 
-        report_tag = simpledialog.askstring(
-            "Report tag",
-            "Enter report tag to include in filename (example: Midterm):",
-            initialvalue="Midterm"
-        )
+        report_tag = report_tag_override
         if report_tag is None:
-            return
+            report_tag = simpledialog.askstring(
+                "Report tag",
+                "Enter report tag to include in filename (example: Midterm):",
+                initialvalue="Midterm"
+            )
+            if report_tag is None:
+                return
+        report_tag = report_tag.strip() or "Midterm"
 
         exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map)
 
