@@ -149,13 +149,15 @@ class GPT_test:
 
         if not self.api_key:
             lines = [
-                "Offline chat mode is active (no API key configured).",
-                f"I received your message: {clean_msg[:300]}",
+                "Local assistant mode is active.",
+                f"You said: {clean_msg[:300]}",
             ]
             if clean_ctx:
                 ctx_lines = len(clean_ctx.splitlines())
-                lines.append(f"Bundle attached with {ctx_lines} line(s).")
-            lines.append("Tip: configure API key in Settings to get model responses.")
+                lines.append(f"Bundle included: {ctx_lines} line(s).")
+                lines.append("I can help format or summarize this bundle, but scoring/model reasoning needs an API key.")
+            else:
+                lines.append("Add a bundle on the left panel for richer context.")
             return "\n".join(lines)
 
         user_payload = {
