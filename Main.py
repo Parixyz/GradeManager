@@ -3070,6 +3070,7 @@ class App:
         self.gpt_model_var = tk.StringVar(value="gpt-4.1-mini")
         self.gpt_remote_enabled_var = tk.BooleanVar(value=False)
         self.auto_prompt_text_widget = None
+        self.theme_settings_text = None
         self.prompt_process_text_widget = None
         self.prompt_result_text_widget = None
         self.chat_message_widget = None
@@ -3333,6 +3334,19 @@ class App:
                                        highlightthickness=0, selectbackground=self.palette["select"])
         self.comment_list.grid(row=15, column=0, sticky="nsew")
 
+    def _current_theme_instructions(self) -> str:
+        theme = (self.theme_text.get("1.0", tk.END).strip() if self.theme_text is not None else "") or DEFAULT_THEME
+        if getattr(self, "theme_settings_text", None) is not None:
+            settings_theme = self.theme_settings_text.get("1.0", tk.END).strip()
+            if settings_theme:
+                theme = settings_theme
+            self.theme_settings_text.delete("1.0", tk.END)
+            self.theme_settings_text.insert("1.0", theme)
+        if self.theme_text is not None:
+            self.theme_text.delete("1.0", tk.END)
+            self.theme_text.insert("1.0", theme)
+        return theme
+
     def _on_leniency_change(self):
         self.leniency_label_var.set(f"Leniency level: {float(self.leniency_level_var.get()):.2f} (strict ↔ lenient)")
 
@@ -3578,7 +3592,8 @@ class App:
         wrap.columnconfigure(0, weight=1)
         wrap.rowconfigure(0, weight=1)
         wrap.rowconfigure(1, weight=1)
-        wrap.rowconfigure(2, weight=0)
+        wrap.rowconfigure(2, weight=1)
+        wrap.rowconfigure(3, weight=0)
 
         include_box = ttk.Frame(wrap, style="PastelCard.TFrame", padding=10)
         include_box.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
@@ -3609,8 +3624,28 @@ class App:
         ttk.Label(tag_row, text="Batch tag", style="PastelCard.TLabel").pack(side=tk.LEFT)
         ttk.Entry(tag_row, textvariable=self.pdf_menu_batch_tag_var, width=24).pack(side=tk.LEFT, padx=(8, 0))
 
+        auto_box = ttk.Frame(wrap, style="PastelCard.TFrame", padding=10)
+        auto_box.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
+        auto_box.columnconfigure(0, weight=1)
+        auto_box.rowconfigure(1, weight=1)
+        ttk.Label(auto_box, text="Auto-Grade preflight settings", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        self.theme_settings_text = tk.Text(auto_box, height=5, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.theme_settings_text.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        self.theme_settings_text.insert("1.0", DEFAULT_THEME)
+
+        leniency_row = ttk.Frame(auto_box, style="PastelCard.TFrame")
+        leniency_row.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(leniency_row, text="Leniency", style="PastelCard.TLabel").pack(side=tk.LEFT)
+        ttk.Scale(leniency_row, from_=-1.0, to=1.0, variable=self.leniency_level_var, command=lambda _v: self._on_leniency_change()).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(8, 0))
+        ttk.Label(auto_box, textvariable=self.leniency_label_var, style="PastelCard.TLabel").grid(row=3, column=0, sticky="w", pady=(6, 0))
+
+        preflight_btns = ttk.Frame(auto_box, style="PastelCard.TFrame")
+        preflight_btns.grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(preflight_btns, text="Apply to Grade tab", command=self._current_theme_instructions).pack(side=tk.LEFT)
+        ttk.Button(preflight_btns, text="Save theme + leniency", command=self.save_theme).pack(side=tk.LEFT, padx=6)
+
         btns = ttk.Frame(wrap, style="Pastel.TFrame")
-        btns.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        btns.grid(row=3, column=0, sticky="w", pady=(8, 0))
         ttk.Button(btns, text="Save UI Settings", command=self.save_ui_preferences).pack(side=tk.LEFT)
         ttk.Button(btns, text="Reload UI Settings", command=self.load_ui_preferences).pack(side=tk.LEFT, padx=6)
 
@@ -4202,6 +4237,9 @@ class App:
         theme = meta_get(self.grade_con, "theme", DEFAULT_THEME)
         self.theme_text.delete("1.0", tk.END)
         self.theme_text.insert("1.0", theme)
+        if self.theme_settings_text is not None:
+            self.theme_settings_text.delete("1.0", tk.END)
+            self.theme_settings_text.insert("1.0", theme)
         try:
             self.leniency_level_var.set(max(-1.0, min(1.0, float(meta_get(self.grade_con, "leniency_level", "0") or 0.0))))
         except Exception:
@@ -4612,7 +4650,7 @@ class App:
             messagebox.showinfo("Missing", "Load a rubric scheme first.")
             return
 
-        theme = self.theme_text.get("1.0", tk.END).strip()
+        theme = self._current_theme_instructions()
         try:
             with self.grade_con:
                 self._auto_grade_one_student(self.selected_student_id, qids, theme)
@@ -4638,7 +4676,7 @@ class App:
             messagebox.showinfo("Missing", "No included students found.")
             return
 
-        theme = self.theme_text.get("1.0", tk.END).strip()
+        theme = self._current_theme_instructions()
         failed = []
         with self.grade_con:
             for sid in student_ids:
@@ -4659,7 +4697,7 @@ class App:
     def save_theme(self):
         if not self.require_grading_db():
             return
-        theme = self.theme_text.get("1.0", tk.END).strip()
+        theme = self._current_theme_instructions()
         meta_set(self.grade_con, "theme", theme)
         meta_set(self.grade_con, "leniency_level", f"{float(self.leniency_level_var.get()):.3f}")
         messagebox.showinfo("Saved", "Theme + leniency saved.")
