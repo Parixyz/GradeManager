@@ -3409,6 +3409,9 @@ class App:
     def _send_to_chat(self, message: str, context_bundle: str, show_label: str):
         self._append_chat_transcript(show_label, message)
         try:
+            # Keep runtime settings in sync so chat immediately uses any API/model edits
+            # without requiring an explicit "Save GPT Settings" click first.
+            self._refresh_gpt_client()
             reply = self.gpt_tester.chat(message=message, context_bundle=context_bundle)
         except Exception as exc:
             reply = f"Chat failed: {exc}"
@@ -4383,6 +4386,7 @@ class App:
         messagebox.showinfo("AutoFill", "AutoFill applied across all rubric rows. Mark reviewed after checking.")
 
     def _auto_grade_one_student(self, sid: str, qids: list[str], theme: str):
+        self._refresh_gpt_client()
         merged_code, file_map = self._merged_code_and_file_map(sid)
         for qid in qids:
             cols = fetch_columns_for_question(self.grade_con, qid)
@@ -4872,6 +4876,7 @@ class App:
         theme = self.theme_text.get("1.0", tk.END).strip()
 
         try:
+            self._refresh_gpt_client()
             res = self.auto_grader.auto_grade(question_id=self.selected_question_id, question_title=(self.question_map.get(self.selected_question_id, self.selected_question_id) or self.selected_question_id), merged_code=merged_code, rubric_items=rubric_items, theme_text=theme)
             self._capture_auto_grade_trace(self.selected_question_id)
         except Exception as e:
