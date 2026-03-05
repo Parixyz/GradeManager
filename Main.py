@@ -1156,10 +1156,23 @@ def export_all_to_excel(
 # =============================================================================
 
 class PDFExporter:
-    def __init__(self, sub_con: sqlite3.Connection, grade_con: sqlite3.Connection, question_map: dict[str, str]):
+    def __init__(
+        self,
+        sub_con: sqlite3.Connection,
+        grade_con: sqlite3.Connection,
+        question_map: dict[str, str],
+        student_pdf_options: dict | None = None,
+    ):
         self.sub_con = sub_con
         self.grade_con = grade_con
         self.question_map = question_map
+        opts = student_pdf_options or {}
+        self.student_pdf_options = {
+            "include_grade_tables": bool(opts.get("include_grade_tables", True)),
+            "include_rationale": bool(opts.get("include_rationale", True)),
+            "include_comment_highlights": bool(opts.get("include_comment_highlights", True)),
+            "include_full_code_listing": bool(opts.get("include_full_code_listing", True)),
+        }
 
     def _build_annotated_code_injected(self, sid: str) -> str:
         """
@@ -1378,7 +1391,7 @@ class PDFExporter:
         story.append(Paragraph(f"<b>Overall total:</b> {overall:g}", styles["Normal"]))
         story.append(Spacer(1, 12))
 
-        # Per-question tables
+        # Per-question grading details
         for qid in fetch_all_question_ids(self.grade_con):
             qtitle = self.question_map.get(qid, qid)
             total = compute_total(self.grade_con, sid, qid)
@@ -1386,115 +1399,116 @@ class PDFExporter:
                 continue
             story.append(Paragraph(f"<b>{qid}</b> — {qtitle} (Total: {total:g})", styles["Heading2"]))
 
-            cols = fetch_columns_for_question(self.grade_con, qid)
-            score_map, note_map = load_student_scores(self.grade_con, sid, qid)
+            if self.student_pdf_options["include_grade_tables"]:
+                cols = fetch_columns_for_question(self.grade_con, qid)
+                score_map, note_map = load_student_scores(self.grade_con, sid, qid)
 
-            cell_style = styles["BodyText"].clone("rubric_cell_style")
-            cell_style.fontSize = 8
-            cell_style.leading = 10
+                cell_style = styles["BodyText"].clone("rubric_cell_style")
+                cell_style.fontSize = 8
+                cell_style.leading = 10
 
-            table_data = [["Group", "Criterion", "Max", "Pts", "Note"]]
-            for col_key, group, text, mx in cols:
-                pts = score_map.get(col_key, 0.0) or 0.0
-                note = (note_map.get(col_key, "") or "")
-                esc_group = (group or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                esc_text = (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                esc_note = note[:240].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                table_data.append([
-                    Paragraph(esc_group, cell_style),
-                    Paragraph(esc_text, cell_style),
-                    f"{mx:g}",
-                    f"{pts:g}",
-                    Paragraph(esc_note, cell_style),
-                ])
+                table_data = [["Group", "Criterion", "Max", "Pts", "Note"]]
+                for col_key, group, text, mx in cols:
+                    pts = score_map.get(col_key, 0.0) or 0.0
+                    note = (note_map.get(col_key, "") or "")
+                    esc_group = (group or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    esc_text = (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    esc_note = note[:240].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    table_data.append([
+                        Paragraph(esc_group, cell_style),
+                        Paragraph(esc_text, cell_style),
+                        f"{mx:g}",
+                        f"{pts:g}",
+                        Paragraph(esc_note, cell_style),
+                    ])
 
-            tbl = Table(table_data, colWidths=[80, 180, 40, 40, 216], repeatRows=1)
-            tbl.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE5FF")),
-                ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#3B2D5C")),
-                ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#B7B7B7")),
-                ("VALIGN", (0,0), (-1,-1), "TOP"),
-                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-                ("FONTSIZE", (0,0), (-1,-1), 8),
-                ("LEFTPADDING", (0,0), (-1,-1), 4),
-                ("RIGHTPADDING", (0,0), (-1,-1), 4),
-                ("TOPPADDING", (0,0), (-1,-1), 3),
-                ("BOTTOMPADDING", (0,0), (-1,-1), 3),
-            ]))
-            story.append(tbl)
-            story.append(Spacer(1, 10))
+                tbl = Table(table_data, colWidths=[80, 180, 40, 40, 216], repeatRows=1)
+                tbl.setStyle(TableStyle([
+                    ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE5FF")),
+                    ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#3B2D5C")),
+                    ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#B7B7B7")),
+                    ("VALIGN", (0,0), (-1,-1), "TOP"),
+                    ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0,0), (-1,-1), 8),
+                    ("LEFTPADDING", (0,0), (-1,-1), 4),
+                    ("RIGHTPADDING", (0,0), (-1,-1), 4),
+                    ("TOPPADDING", (0,0), (-1,-1), 3),
+                    ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+                ]))
+                story.append(tbl)
+                story.append(Spacer(1, 10))
 
             note_row = load_student_note(self.grade_con, sid, qid)
             rationale = note_row[0] if note_row and note_row[0] else ""
-            if rationale:
+            if self.student_pdf_options["include_rationale"] and rationale:
                 story.append(Paragraph("<b>Rationale</b>", styles["Heading3"]))
                 story.append(Paragraph(rationale.replace("\n", "<br/>"), styles["Normal"]))
                 story.append(Spacer(1, 10))
 
-        # Highlighted code + comments table (compact, printable)
-        story.append(PageBreak())
-        story.append(Paragraph("<b>Highlighted Code Review</b>", styles["Heading2"]))
-        rows = fetch_code_comments_for_student(self.grade_con, sid)
-        if not rows:
-            story.append(Paragraph("(No code comments.)", styles["Normal"]))
-        else:
-            cell_style = styles["BodyText"].clone("comment_cell_style")
-            cell_style.fontSize = 8
-            cell_style.leading = 10
-
-            td = [["File", "Range", "Code (highlighted part)", "Comment"]]
-            for fp, sidx, eidx, txt, _color, _ts in rows:
-                snippet = self._extract_code_snippet(fp, sidx, eidx)
-                esc_file = Path(fp).name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                esc_snippet = (snippet or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                esc_comment = (txt or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                td.append([
-                    Paragraph(esc_file, cell_style),
-                    Paragraph(f"{sidx}–{eidx}", cell_style),
-                    Paragraph(esc_snippet or "(empty selection)", cell_style),
-                    Paragraph(esc_comment[:320], cell_style),
-                ])
-
-            tbl2 = Table(td, colWidths=[85, 90, 200, 181], repeatRows=1)
-            tbl2.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE5FF")),
-                ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#FF4FA3")),
-                ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#B7B7B7")),
-                ("VALIGN", (0,0), (-1,-1), "TOP"),
-                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-                ("BACKGROUND", (2,1), (2,-1), colors.HexColor("#FFF9A6")),
-                ("FONTSIZE", (0,0), (-1,-1), 8),
-                ("LEFTPADDING", (0,0), (-1,-1), 4),
-                ("RIGHTPADDING", (0,0), (-1,-1), 4),
-                ("TOPPADDING", (0,0), (-1,-1), 3),
-                ("BOTTOMPADDING", (0,0), (-1,-1), 3),
-            ]))
-            story.append(tbl2)
-
-        # Full code listing with highlighted markers
-        story.append(PageBreak())
-        story.append(Paragraph("<b>Full Code Listing</b>", styles["Heading2"]))
-        blocks = self._build_highlighted_code_blocks(sid)
-        line_style = styles["Code"].clone("code_line_style")
-        line_style.fontSize = 7
-        line_style.leading = 8
-        for bi, (fname, rendered_lines) in enumerate(blocks):
-            story.append(Paragraph(f"<b>{fname}</b>", styles["Heading3"]))
-            if not rendered_lines:
-                story.append(Paragraph("(empty file)", styles["Normal"]))
+        if self.student_pdf_options["include_comment_highlights"]:
+            story.append(PageBreak())
+            story.append(Paragraph("<b>Highlighted Code Review</b>", styles["Heading2"]))
+            rows = fetch_code_comments_for_student(self.grade_con, sid)
+            if not rows:
+                story.append(Paragraph("(No code comments.)", styles["Normal"]))
             else:
-                table_data = [[Paragraph(line or " ", line_style)] for line in rendered_lines]
-                tbl_code = Table(table_data, colWidths=[516], repeatRows=0)
-                tbl_code.setStyle(TableStyle([
-                    ("GRID", (0,0), (-1,-1), 0.2, colors.HexColor("#E0E0E0")),
+                cell_style = styles["BodyText"].clone("comment_cell_style")
+                cell_style.fontSize = 8
+                cell_style.leading = 10
+
+                td = [["File", "Range", "Code (highlighted part)", "Comment"]]
+                for fp, sidx, eidx, txt, _color, _ts in rows:
+                    snippet = self._extract_code_snippet(fp, sidx, eidx)
+                    esc_file = Path(fp).name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    esc_snippet = (snippet or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    esc_comment = (txt or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    td.append([
+                        Paragraph(esc_file, cell_style),
+                        Paragraph(f"{sidx}–{eidx}", cell_style),
+                        Paragraph(esc_snippet or "(empty selection)", cell_style),
+                        Paragraph(esc_comment[:320], cell_style),
+                    ])
+
+                tbl2 = Table(td, colWidths=[85, 90, 200, 181], repeatRows=1)
+                tbl2.setStyle(TableStyle([
+                    ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#EFE5FF")),
+                    ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#FF4FA3")),
+                    ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#B7B7B7")),
+                    ("VALIGN", (0,0), (-1,-1), "TOP"),
+                    ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+                    ("BACKGROUND", (2,1), (2,-1), colors.HexColor("#FFF9A6")),
+                    ("FONTSIZE", (0,0), (-1,-1), 8),
                     ("LEFTPADDING", (0,0), (-1,-1), 4),
                     ("RIGHTPADDING", (0,0), (-1,-1), 4),
-                    ("TOPPADDING", (0,0), (-1,-1), 1),
-                    ("BOTTOMPADDING", (0,0), (-1,-1), 1),
+                    ("TOPPADDING", (0,0), (-1,-1), 3),
+                    ("BOTTOMPADDING", (0,0), (-1,-1), 3),
                 ]))
-                story.append(tbl_code)
-            if bi < len(blocks) - 1:
-                story.append(PageBreak())
+                story.append(tbl2)
+
+        if self.student_pdf_options["include_full_code_listing"]:
+            story.append(PageBreak())
+            story.append(Paragraph("<b>Full Code Listing</b>", styles["Heading2"]))
+            blocks = self._build_highlighted_code_blocks(sid)
+            line_style = styles["Code"].clone("code_line_style")
+            line_style.fontSize = 7
+            line_style.leading = 8
+            for bi, (fname, rendered_lines) in enumerate(blocks):
+                story.append(Paragraph(f"<b>{fname}</b>", styles["Heading3"]))
+                if not rendered_lines:
+                    story.append(Paragraph("(empty file)", styles["Normal"]))
+                else:
+                    table_data = [[Paragraph(line or " ", line_style)] for line in rendered_lines]
+                    tbl_code = Table(table_data, colWidths=[516], repeatRows=0)
+                    tbl_code.setStyle(TableStyle([
+                        ("GRID", (0,0), (-1,-1), 0.2, colors.HexColor("#E0E0E0")),
+                        ("LEFTPADDING", (0,0), (-1,-1), 4),
+                        ("RIGHTPADDING", (0,0), (-1,-1), 4),
+                        ("TOPPADDING", (0,0), (-1,-1), 1),
+                        ("BOTTOMPADDING", (0,0), (-1,-1), 1),
+                    ]))
+                    story.append(tbl_code)
+                if bi < len(blocks) - 1:
+                    story.append(PageBreak())
 
         doc.build(story)
 
@@ -2947,7 +2961,7 @@ class App:
 
         self.gpt_api_key_var = tk.StringVar(value="")
         self.gpt_model_var = tk.StringVar(value="gpt-4.1-mini")
-        self.gpt_remote_enabled_var = tk.StringVar(value="0")
+        self.gpt_remote_enabled_var = tk.BooleanVar(value=False)
         self.auto_prompt_text_widget = None
         self.prompt_process_text_widget = None
         self.prompt_result_text_widget = None
@@ -2966,6 +2980,10 @@ class App:
         self.pdf_menu_include_summary_var = tk.BooleanVar(value=True)
         self.pdf_menu_include_batch_var = tk.BooleanVar(value=False)
         self.pdf_menu_batch_tag_var = tk.StringVar(value="Midterm")
+        self.pdf_content_grades_var = tk.BooleanVar(value=True)
+        self.pdf_content_rationale_var = tk.BooleanVar(value=True)
+        self.pdf_content_highlights_var = tk.BooleanVar(value=True)
+        self.pdf_content_full_code_var = tk.BooleanVar(value=True)
         self.last_auto_grade_trace = {"prompt": "", "result": "", "source": ""}
 
         self.db_table_pick_var = tk.StringVar(value="")
@@ -3452,6 +3470,10 @@ class App:
         ttk.Checkbutton(pdf_box, text="Include student PDF", variable=self.pdf_menu_include_student_var).pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(pdf_box, text="Include summary PDF", variable=self.pdf_menu_include_summary_var).pack(anchor="w")
         ttk.Checkbutton(pdf_box, text="Include all student PDFs", variable=self.pdf_menu_include_batch_var).pack(anchor="w")
+        ttk.Checkbutton(pdf_box, text="Student PDF: write grades table", variable=self.pdf_content_grades_var).pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(pdf_box, text="Student PDF: write rationale", variable=self.pdf_content_rationale_var).pack(anchor="w")
+        ttk.Checkbutton(pdf_box, text="Student PDF: write code highlights", variable=self.pdf_content_highlights_var).pack(anchor="w")
+        ttk.Checkbutton(pdf_box, text="Student PDF: write full code listing", variable=self.pdf_content_full_code_var).pack(anchor="w")
         tag_row = ttk.Frame(pdf_box, style="PastelCard.TFrame")
         tag_row.pack(anchor="w", pady=(8, 0))
         ttk.Label(tag_row, text="Batch tag", style="PastelCard.TLabel").pack(side=tk.LEFT)
@@ -3476,6 +3498,10 @@ class App:
             "pdf_include_summary": bool(self.pdf_menu_include_summary_var.get()),
             "pdf_include_batch": bool(self.pdf_menu_include_batch_var.get()),
             "pdf_batch_tag": self.pdf_menu_batch_tag_var.get().strip() or "Midterm",
+            "pdf_content_grades": bool(self.pdf_content_grades_var.get()),
+            "pdf_content_rationale": bool(self.pdf_content_rationale_var.get()),
+            "pdf_content_highlights": bool(self.pdf_content_highlights_var.get()),
+            "pdf_content_full_code": bool(self.pdf_content_full_code_var.get()),
         }
         meta_set(self.grade_con, "ui_preferences", json.dumps(prefs))
         self.refresh_chat_preview()
@@ -3505,6 +3531,10 @@ class App:
         self.pdf_menu_include_summary_var.set(bool(prefs.get("pdf_include_summary", True)))
         self.pdf_menu_include_batch_var.set(bool(prefs.get("pdf_include_batch", False)))
         self.pdf_menu_batch_tag_var.set((prefs.get("pdf_batch_tag") or "Midterm").strip() or "Midterm")
+        self.pdf_content_grades_var.set(bool(prefs.get("pdf_content_grades", True)))
+        self.pdf_content_rationale_var.set(bool(prefs.get("pdf_content_rationale", True)))
+        self.pdf_content_highlights_var.set(bool(prefs.get("pdf_content_highlights", True)))
+        self.pdf_content_full_code_var.set(bool(prefs.get("pdf_content_full_code", True)))
         self.refresh_chat_preview()
 
     def clear_chat_transcript(self):
@@ -3597,6 +3627,13 @@ class App:
         ttk.Checkbutton(opts, text="Include summary PDF", variable=self.pdf_menu_include_summary_var).pack(anchor="w")
         ttk.Checkbutton(opts, text="Include batch PDFs", variable=self.pdf_menu_include_batch_var).pack(anchor="w")
 
+        content = ttk.LabelFrame(self.tab_pdf_menu, text="Student PDF content", padding=10)
+        content.pack(fill=tk.X, pady=(0, 8))
+        ttk.Checkbutton(content, text="Grades table (rubric rows + points + notes)", variable=self.pdf_content_grades_var).pack(anchor="w")
+        ttk.Checkbutton(content, text="Rationale text", variable=self.pdf_content_rationale_var).pack(anchor="w")
+        ttk.Checkbutton(content, text="Code comment highlights", variable=self.pdf_content_highlights_var).pack(anchor="w")
+        ttk.Checkbutton(content, text="Full code listing", variable=self.pdf_content_full_code_var).pack(anchor="w")
+
         tag_row = ttk.Frame(opts, style="PastelCard.TFrame")
         tag_row.pack(fill=tk.X, pady=(8, 0))
         ttk.Label(tag_row, text="Batch report tag", style="PastelCard.TLabel").pack(side=tk.LEFT)
@@ -3611,9 +3648,17 @@ class App:
 
         ttk.Label(
             self.tab_pdf_menu,
-            text="Tick the outputs you want, then run once. This keeps PDF flow quick and untickable.",
+            text="Select exactly what will be written in Student PDFs. Unticked items will not be written.",
             style="Pastel.TLabel"
         ).pack(anchor="w", pady=(8, 0))
+
+    def _student_pdf_options(self) -> dict:
+        return {
+            "include_grade_tables": bool(self.pdf_content_grades_var.get()),
+            "include_rationale": bool(self.pdf_content_rationale_var.get()),
+            "include_comment_highlights": bool(self.pdf_content_highlights_var.get()),
+            "include_full_code_listing": bool(self.pdf_content_full_code_var.get()),
+        }
 
     def run_pdf_menu_exports(self):
         ran_any = False
@@ -3894,8 +3939,8 @@ class App:
         box.columnconfigure(1, weight=1)
 
         ttk.Label(box, text="GPT Auto-Grader Settings", style="PastelCard.TLabel", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(box, text="Enable remote GPT calls (1/0)", style="PastelCard.TLabel").grid(row=1, column=0, sticky="w", pady=(10, 4))
-        ttk.Entry(box, textvariable=self.gpt_remote_enabled_var, width=8).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(10, 4))
+        ttk.Label(box, text="Enable API key for Auto Grade + Chat", style="PastelCard.TLabel").grid(row=1, column=0, sticky="w", pady=(10, 4))
+        ttk.Checkbutton(box, variable=self.gpt_remote_enabled_var, text="Use online model", style="PastelCard.TCheckbutton").grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(10, 4))
 
         ttk.Label(box, text="API Key", style="PastelCard.TLabel").grid(row=2, column=0, sticky="w", pady=4)
         ttk.Entry(box, textvariable=self.gpt_api_key_var, show="*", width=70).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=4)
@@ -3920,7 +3965,9 @@ class App:
         meta_set(self.grade_con, "gpt_api_key", self.gpt_api_key_var.get().strip())
         meta_set(self.grade_con, "gpt_model", self.gpt_model_var.get().strip() or "gpt-4.1-mini")
         meta_set(self.grade_con, "gpt_prompt", prompt)
-        meta_set(self.grade_con, "gpt_remote_enabled", "1" if self.gpt_remote_enabled_var.get().strip() == "1" else "0")
+        if self.gpt_api_key_var.get().strip() and not self.gpt_remote_enabled_var.get():
+            self.gpt_remote_enabled_var.set(True)
+        meta_set(self.grade_con, "gpt_remote_enabled", "1" if self.gpt_remote_enabled_var.get() else "0")
         self._refresh_gpt_client()
         messagebox.showinfo("Saved", "GPT settings saved.")
 
@@ -3929,7 +3976,7 @@ class App:
             return
         self.gpt_api_key_var.set(meta_get(self.grade_con, "gpt_api_key", ""))
         self.gpt_model_var.set(meta_get(self.grade_con, "gpt_model", "gpt-4.1-mini"))
-        self.gpt_remote_enabled_var.set(meta_get(self.grade_con, "gpt_remote_enabled", "0") or "0")
+        self.gpt_remote_enabled_var.set((meta_get(self.grade_con, "gpt_remote_enabled", "0") or "0") == "1")
         prompt = meta_get(self.grade_con, "gpt_prompt", "")
         if self.auto_prompt_text_widget is not None:
             self.auto_prompt_text_widget.delete("1.0", tk.END)
@@ -3937,7 +3984,7 @@ class App:
         self._refresh_gpt_client()
 
     def _refresh_gpt_client(self):
-        key = self.gpt_api_key_var.get().strip() if self.gpt_remote_enabled_var.get().strip() == "1" else ""
+        key = self.gpt_api_key_var.get().strip() if self.gpt_remote_enabled_var.get() else ""
         prompt = self.auto_prompt_text_widget.get("1.0", tk.END).strip() if self.auto_prompt_text_widget else ""
         self.gpt_tester = GPT_test(api_key=key, model=self.gpt_model_var.get().strip() or "gpt-4.1-mini", system_prompt=prompt)
         self.auto_grader = AutoGrader(self.gpt_tester)
@@ -4205,7 +4252,7 @@ class App:
 
         try:
             export_all_to_excel(self.sub_con, self.grade_con, excel_path)
-            exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map)
+            exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map, self._student_pdf_options())
             exporter.export_summary_pdf(summary_pdf, self.compute_class_stats_text())
             exporter.export_all_students_pdfs(pdf_dir, report_tag=report_tag)
             stats_txt.write_text(self.compute_class_stats_text() + "\n", encoding="utf-8")
@@ -5050,7 +5097,7 @@ class App:
         if not out:
             return
 
-        exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map)
+        exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map, self._student_pdf_options())
         try:
             exporter.export_student_pdf(self.selected_student_id, Path(out))
         except Exception as e:
@@ -5073,7 +5120,7 @@ class App:
         if not out:
             return
 
-        exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map)
+        exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map, self._student_pdf_options())
         try:
             exporter.export_summary_pdf(Path(out), self.compute_class_stats_text())
         except Exception as e:
@@ -5103,7 +5150,7 @@ class App:
                 return
         report_tag = report_tag.strip() or "Midterm"
 
-        exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map)
+        exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map, self._student_pdf_options())
 
         prog = tk.Toplevel(self.root)
         prog.title("Exporting PDFs...")
