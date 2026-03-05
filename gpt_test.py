@@ -153,9 +153,13 @@ class GPT_test:
                 f"You said: {clean_msg[:300]}",
             ]
             if clean_ctx:
+                snippet = "\n".join(clean_ctx.splitlines()[:8]).strip()
                 ctx_lines = len(clean_ctx.splitlines())
                 lines.append(f"Bundle included: {ctx_lines} line(s).")
-                lines.append("I can help format or summarize this bundle, but scoring/model reasoning needs an API key.")
+                lines.append("Quick local analysis (no API key):")
+                if snippet:
+                    lines.append(snippet[:500])
+                lines.append("I can summarize/reformat this bundle locally. Model-based scoring still needs an API key.")
             else:
                 lines.append("Add a bundle on the left panel for richer context.")
             return "\n".join(lines)
