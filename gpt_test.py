@@ -19,7 +19,8 @@ class GPT_test:
         self.last_raw_response = None
         self.last_result = None
 
-    def _heuristic_grade(self, question_id: str, question_title: str, rubric_items: list[dict], code_text: str, leniency_level: float = 0.0) -> dict:
+    def _heuristic_grade(self, question_id: str, question_title: str, rubric_items: list[dict], code_text: str,
+                         leniency_level: float = 0.0, extra_prompt: str = "") -> dict:
         text = (code_text or "").lower()
         scores = []
         lines = [ln for ln in (code_text or "").splitlines() if ln.strip()]
@@ -51,9 +52,10 @@ class GPT_test:
             note = f"Estimated against criterion text for {question_id}."
             scores.append({"col_key": col_key, "points": points, "note": note})
 
-        rationale = (
-            f"Feedback summary for {question_id} ({question_title or question_id}) based on rubric criteria and code evidence."
-        )
+        theme_note = (extra_prompt or "").strip()
+        rationale = f"Feedback summary for {question_id} ({question_title or question_id}) based on rubric criteria and code evidence."
+        if theme_note:
+            rationale += f" Theme applied: {theme_note[:240]}"
         comments = []
         for idx, ln in enumerate((code_text or "").splitlines(), start=1):
             low = ln.lower()
@@ -116,7 +118,14 @@ class GPT_test:
                 "leniency_level": float(leniency_level or 0.0),
             }
             self.last_request_body = None
-            result = self._heuristic_grade(question_id, question_title, rubric_items, code_text, leniency_level=float(leniency_level or 0.0))
+            result = self._heuristic_grade(
+                question_id,
+                question_title,
+                rubric_items,
+                code_text,
+                leniency_level=float(leniency_level or 0.0),
+                extra_prompt=extra_prompt,
+            )
             self.last_result = result
             return result
 
@@ -124,9 +133,12 @@ class GPT_test:
             "question_id": question_id,
             "question_title": (question_title or question_id),
             "instructions": (
-                (self.system_prompt or "Grade code strictly but fairly.")
+                "Apply the theme/instructions first before any scoring."
                 + "\n"
                 + (extra_prompt or "")
+                + "\nIn the rationale, explicitly explain how the theme/instructions affected the grading decisions."
+                + "\n"
+                + (self.system_prompt or "Grade code strictly but fairly.")
                 + f"\nLeniency level: {float(leniency_level or 0.0):.2f} (-1 strict, +1 lenient)."
                 + "\nUse the exact question context and rubric min/max ranges."
                 + "\nFor line comments/highlights: include only mistakes, bugs, or missing requirements. Do not add praise-only comments."
