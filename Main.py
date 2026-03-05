@@ -658,6 +658,7 @@ def grading_db_init(con: sqlite3.Connection):
     CREATE TABLE IF NOT EXISTS grading_progress(
       student_id TEXT PRIMARY KEY,
       graded INTEGER NOT NULL DEFAULT 0,
+      reviewed INTEGER NOT NULL DEFAULT 1,
       first_graded_at TEXT,
       last_updated_at TEXT,
       last_question_id TEXT
@@ -678,6 +679,12 @@ def grading_db_init(con: sqlite3.Connection):
         cols = [r[1] for r in con.execute("PRAGMA table_info(rubric_questions)").fetchall()]
         if "sub_id" not in cols:
             con.execute("ALTER TABLE rubric_questions ADD COLUMN sub_id TEXT;")
+    except Exception:
+        pass
+    try:
+        cols = [r[1] for r in con.execute("PRAGMA table_info(grading_progress)").fetchall()]
+        if "reviewed" not in cols:
+            con.execute("ALTER TABLE grading_progress ADD COLUMN reviewed INTEGER NOT NULL DEFAULT 1;")
     except Exception:
         pass
     con.commit()
@@ -893,13 +900,16 @@ def load_student_assignment(con: sqlite3.Connection, student_id: str) -> tuple[s
     return (row[0] or None), (row[1] or None)
 
 
-def upsert_grading_progress(con: sqlite3.Connection, student_id: str, question_id: str | None = None, mark_graded: bool = True, commit: bool = True):
+def upsert_grading_progress(con: sqlite3.Connection, student_id: str, question_id: str | None = None,
+                           mark_graded: bool = True, reviewed: bool | None = None, commit: bool = True):
     now = now_ts()
+    reviewed_val = None if reviewed is None else (1 if reviewed else 0)
     con.execute("""
-      INSERT INTO grading_progress(student_id, graded, first_graded_at, last_updated_at, last_question_id)
-      VALUES(?,?,?,?,?)
+      INSERT INTO grading_progress(student_id, graded, reviewed, first_graded_at, last_updated_at, last_question_id)
+      VALUES(?,?,?,?,?,?)
       ON CONFLICT(student_id) DO UPDATE SET
         graded=CASE WHEN excluded.graded=1 THEN 1 ELSE grading_progress.graded END,
+        reviewed=COALESCE(excluded.reviewed, grading_progress.reviewed),
         first_graded_at=CASE
           WHEN grading_progress.first_graded_at IS NULL OR grading_progress.first_graded_at='' THEN
             CASE WHEN excluded.graded=1 THEN excluded.first_graded_at ELSE grading_progress.first_graded_at END
@@ -907,7 +917,7 @@ def upsert_grading_progress(con: sqlite3.Connection, student_id: str, question_i
         END,
         last_updated_at=excluded.last_updated_at,
         last_question_id=COALESCE(excluded.last_question_id, grading_progress.last_question_id)
-    """, (student_id, 1 if mark_graded else 0, now if mark_graded else None, now, question_id))
+    """, (student_id, 1 if mark_graded else 0, reviewed_val, now if mark_graded else None, now, question_id))
     if commit:
         con.commit()
 
@@ -932,12 +942,24 @@ def set_student_graded_flag(con: sqlite3.Connection, student_id: str, graded: bo
 
 def load_grading_progress(con: sqlite3.Connection, student_id: str):
     row = con.execute("""
-      SELECT graded, COALESCE(first_graded_at,''), COALESCE(last_updated_at,''), COALESCE(last_question_id,'')
+      SELECT graded, COALESCE(reviewed,1), COALESCE(first_graded_at,''), COALESCE(last_updated_at,''), COALESCE(last_question_id,'')
       FROM grading_progress WHERE student_id=?
     """, (student_id,)).fetchone()
     if not row:
-        return (0, "", "", "")
+        return (0, 1, "", "", "")
     return row
+
+def set_student_reviewed_flag(con: sqlite3.Connection, student_id: str, reviewed: bool, commit: bool = True):
+    now = now_ts()
+    con.execute("""
+      INSERT INTO grading_progress(student_id, reviewed, last_updated_at)
+      VALUES(?,?,?)
+      ON CONFLICT(student_id) DO UPDATE SET
+        reviewed=excluded.reviewed,
+        last_updated_at=excluded.last_updated_at
+    """, (student_id, 1 if reviewed else 0, now))
+    if commit:
+        con.commit()
 
 def add_code_comment(con: sqlite3.Connection, student_id: str, file_path: str, start_index: str, end_index: str,
                      comment_text: str, color: str = "#FFF2B2"):
@@ -1556,49 +1578,10 @@ class PDFExporter:
 
 
 # =============================================================================
-# 8) Optional Auto Grader (separated; can be empty/void)
+# 8) Auto Grader + GPT test helper (external modules)
 # =============================================================================
-
-class AutoGrader:
-    """
-    Optional component.
-    - Keep disabled by default.
-    - Implement your own logic later (unit tests, static checks, etc.).
-    """
-    def __init__(self, enabled: bool = False):
-        self.enabled = enabled
-
-    def auto_grade(self, *, merged_code: str, rubric_items: list[dict], theme_text: str) -> dict:
-        """
-        Return structure:
-          {
-            "scores": [{"col_key": "...", "points": float, "note": "..."}, ...],
-            "rationale": "..."
-          }
-        If disabled, raise or return empty.
-        """
-        if not self.enabled:
-            raise RuntimeError("AutoGrader is disabled (optional component).")
-
-        scores = []
-        for item in (rubric_items or []):
-            col_key = item.get("col_key")
-            if not col_key:
-                continue
-            max_points = float(item.get("max_points", 0.0) or 0.0)
-            pts = random.uniform(0.0, max_points) if max_points > 0 else 0.0
-            pts = round(pts, 2)
-            scores.append({
-                "col_key": col_key,
-                "points": pts,
-                "note": "Auto draft (random in range).",
-            })
-
-        return {
-            "scores": scores,
-            "rationale": "Auto-generated draft scores (randomized within each rubric max). Please review.",
-        }
-
+from gpt_test import GPT_test
+from auto_grader import AutoGrader
 
 # =============================================================================
 # 9) UI widgets
@@ -2951,9 +2934,9 @@ class App:
         self.session_started_at = None
         self.session_elapsed_seconds = 0
         self.session_timer_running = False
-        self.grade_meta_var = tk.StringVar(value="Graded: NO | First graded: - | Last updated: -")
+        self.grade_meta_var = tk.StringVar(value="Graded: NO | Reviewed: YES | First graded: - | Last updated: -")
         self.progress_var = tk.StringVar(value="Progress: assessed 0/0 | left 0")
-        self.main_menu_progress_var = tk.StringVar(value="Students assessed: 0/0 | Left: 0 | Curve preview ×1.00")
+        self.main_menu_progress_var = tk.StringVar(value="Students assessed: 0/0 | Left: 0 | Unreviewed auto: 0 | Curve preview ×1.00")
         self._clock_job = None
 
         # curve preview factor (histogram overlay)
@@ -2962,8 +2945,14 @@ class App:
         # Regex profile state
         self.active_regex_profile_var = tk.StringVar(value="Default")
 
-        # Optional auto-grader (user-invoked only)
-        self.auto_grader = AutoGrader(enabled=False)
+        self.gpt_api_key_var = tk.StringVar(value="")
+        self.gpt_model_var = tk.StringVar(value="gpt-4.1-mini")
+        self.gpt_remote_enabled_var = tk.StringVar(value="0")
+        self.auto_prompt_text_widget = None
+
+        # Auto-grader (heuristic + optional GPT)
+        self.gpt_tester = GPT_test()
+        self.auto_grader = AutoGrader(self.gpt_tester)
 
         self._grade_last_student_selection: tuple[int, ...] = ()
         self._grade_last_file_selection: tuple[int, ...] = ()
@@ -3047,19 +3036,23 @@ class App:
         self.tab_stats = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_progress = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_regex = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
+        self.tab_settings = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
 
         self.nb.add(self.tab_grade, text="Grade")
         self.nb.add(self.tab_summary, text="Summary")
         self.nb.add(self.tab_stats, text="Stats")
         self.nb.add(self.tab_progress, text="Progress")
         self.nb.add(self.tab_regex, text="Regex / Patterns")
+        self.nb.add(self.tab_settings, text="Settings")
 
         self._build_grade_tab()
         self._build_summary_tab()
         self._build_stats_tab()
         self._build_progress_tab()
         self._build_regex_tab()
+        self._build_settings_tab()
         self._ensure_default_regex_profile()
+        self.load_gpt_settings()
         self.reset_session_timer()
 
     def _build_grade_tab(self):
@@ -3145,8 +3138,10 @@ class App:
         btns.grid(row=7, column=0, sticky="ew", pady=(8, 8))
 
         ttk.Button(btns, text="Save Theme", command=self.save_theme).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(btns, text="Fill Random (min-max)", command=self.fill_random_for_current_question).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(btns, text="AutoFill", command=self.auto_fill_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(btns, text="Auto-Grade Files", command=self.auto_grade_files_for_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Save (all questions)", command=self.save_scores_and_rationale).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(btns, text="Mark Reviewed", command=self.mark_selected_student_reviewed).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Export Grade (selected student)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
 
         ttk.Label(right, text="Rationale (applied to all questions for this student)", style="PastelCard.TLabel").grid(row=8, column=0, sticky="w")
@@ -3204,6 +3199,8 @@ class App:
         ttk.Button(top, text="Refresh Progress", command=self.refresh_progress_tab).pack(side=tk.LEFT)
         ttk.Button(top, text="Mark selected graded", command=lambda: self.set_selected_student_graded(True)).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Mark selected ungraded", command=lambda: self.set_selected_student_graded(False)).pack(side=tk.LEFT)
+        ttk.Button(top, text="Mark selected reviewed", command=lambda: self.mark_selected_student_reviewed(True)).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Mark selected unreviewed", command=lambda: self.mark_selected_student_reviewed(False)).pack(side=tk.LEFT)
 
         self.progress_header_lbl = ttk.Label(top, text="", style="Pastel.TLabel")
         self.progress_header_lbl.pack(side=tk.RIGHT)
@@ -3218,9 +3215,9 @@ class App:
         ttk.Button(controls, text="Mark Assessed", command=self.mark_current_student_assessed).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(controls, textvariable=self.progress_var, style="Pastel.TLabel").pack(side=tk.RIGHT)
 
-        cols = ("student_id", "student_name", "graded", "scored_q", "rationale_q", "first_graded", "last_updated", "last_question")
+        cols = ("student_id", "student_name", "graded", "reviewed", "scored_q", "rationale_q", "first_graded", "last_updated", "last_question")
         self.progress_tree = ttk.Treeview(self.tab_progress, columns=cols, show="headings", height=25)
-        for c, w in [("student_id",120),("student_name",180),("graded",80),("scored_q",90),("rationale_q",100),("first_graded",160),("last_updated",160),("last_question",120)]:
+        for c, w in [("student_id",120),("student_name",180),("graded",80),("reviewed",90),("scored_q",90),("rationale_q",100),("first_graded",160),("last_updated",160),("last_question",120)]:
             self.progress_tree.heading(c, text=c)
             self.progress_tree.column(c, width=w, anchor="w")
         self.progress_tree.pack(fill=tk.BOTH, expand=True, pady=(10,0))
@@ -3364,6 +3361,60 @@ class App:
         sub_meta_set(self.sub_con, "active_regex_payload", json.dumps(self._current_regex_payload_from_editor()))
         messagebox.showinfo("Committed", f"Committed regex profile for scans: {name}")
 
+    def _build_settings_tab(self):
+        box = ttk.Frame(self.tab_settings, style="PastelCard.TFrame", padding=12)
+        box.pack(fill=tk.BOTH, expand=True)
+        box.columnconfigure(1, weight=1)
+
+        ttk.Label(box, text="GPT Auto-Grader Settings", style="PastelCard.TLabel", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(box, text="Enable remote GPT calls (1/0)", style="PastelCard.TLabel").grid(row=1, column=0, sticky="w", pady=(10, 4))
+        ttk.Entry(box, textvariable=self.gpt_remote_enabled_var, width=8).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(10, 4))
+
+        ttk.Label(box, text="API Key", style="PastelCard.TLabel").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(box, textvariable=self.gpt_api_key_var, show="*", width=70).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=4)
+
+        ttk.Label(box, text="Model", style="PastelCard.TLabel").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Entry(box, textvariable=self.gpt_model_var, width=40).grid(row=3, column=1, sticky="w", padx=(8, 0), pady=4)
+
+        ttk.Label(box, text="Prompt override", style="PastelCard.TLabel").grid(row=4, column=0, sticky="nw", pady=(8, 4))
+        self.auto_prompt_text_widget = tk.Text(box, height=10, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.auto_prompt_text_widget.grid(row=4, column=1, sticky="nsew", padx=(8, 0), pady=(8, 4))
+        box.rowconfigure(4, weight=1)
+
+        btn_row = ttk.Frame(box, style="PastelCard.TFrame")
+        btn_row.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(btn_row, text="Save GPT Settings", command=self.save_gpt_settings).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="Reload", command=self.load_gpt_settings).pack(side=tk.LEFT, padx=6)
+
+    def save_gpt_settings(self):
+        if not self.require_grading_db():
+            return
+        prompt = self.auto_prompt_text_widget.get("1.0", tk.END).strip() if self.auto_prompt_text_widget else ""
+        meta_set(self.grade_con, "gpt_api_key", self.gpt_api_key_var.get().strip())
+        meta_set(self.grade_con, "gpt_model", self.gpt_model_var.get().strip() or "gpt-4.1-mini")
+        meta_set(self.grade_con, "gpt_prompt", prompt)
+        meta_set(self.grade_con, "gpt_remote_enabled", "1" if self.gpt_remote_enabled_var.get().strip() == "1" else "0")
+        self._refresh_gpt_client()
+        messagebox.showinfo("Saved", "GPT settings saved.")
+
+    def load_gpt_settings(self):
+        if not self.require_grading_db():
+            return
+        self.gpt_api_key_var.set(meta_get(self.grade_con, "gpt_api_key", ""))
+        self.gpt_model_var.set(meta_get(self.grade_con, "gpt_model", "gpt-4.1-mini"))
+        self.gpt_remote_enabled_var.set(meta_get(self.grade_con, "gpt_remote_enabled", "0") or "0")
+        prompt = meta_get(self.grade_con, "gpt_prompt", "")
+        if self.auto_prompt_text_widget is not None:
+            self.auto_prompt_text_widget.delete("1.0", tk.END)
+            self.auto_prompt_text_widget.insert("1.0", prompt)
+        self._refresh_gpt_client()
+
+    def _refresh_gpt_client(self):
+        key = self.gpt_api_key_var.get().strip() if self.gpt_remote_enabled_var.get().strip() == "1" else ""
+        prompt = self.auto_prompt_text_widget.get("1.0", tk.END).strip() if self.auto_prompt_text_widget else ""
+        self.gpt_tester = GPT_test(api_key=key, model=self.gpt_model_var.get().strip() or "gpt-4.1-mini", system_prompt=prompt)
+        self.auto_grader = AutoGrader(self.gpt_tester)
+
     def commit_scan_session_from_window(self, root_folder: str, global_lab_id: str, session_rows: list[dict]):
         name = self.active_regex_profile_var.get().strip() or "Default"
         payload = load_regex_profile(self.sub_con, name) or self._default_regex_payload()
@@ -3440,6 +3491,7 @@ class App:
         theme = meta_get(self.grade_con, "theme", DEFAULT_THEME)
         self.theme_text.delete("1.0", tk.END)
         self.theme_text.insert("1.0", theme)
+        self.load_gpt_settings()
         self.refresh_question_lists()
 
         self.selected_student_id = None
@@ -3706,42 +3758,116 @@ class App:
             return
         self.save_scores_and_rationale(show_message=False)
 
-    def fill_random_for_current_question(self):
+    def _all_question_ids(self):
+        return list(self.question_map.keys())
+
+    def _merged_code_and_file_map(self, sid: str):
+        file_map = {}
+        merged_parts = []
+        for fp in get_student_files(self.sub_con, sid):
+            content = get_file_content(self.sub_con, fp)
+            if content is None:
+                try:
+                    content = read_file_text(Path(fp))
+                except Exception:
+                    content = ""
+            file_map[fp] = content or ""
+            merged_parts.append(f"// FILE: {Path(fp).name}\n{content or ''}")
+        return "\n\n".join(merged_parts), file_map
+
+    def _line_to_index(self, content: str, line_no: int):
+        lines = (content or "").splitlines()
+        ln = max(1, min(line_no, len(lines) if lines else 1))
+        col_end = len(lines[ln - 1]) if lines else 0
+        return f"{ln}.0", f"{ln}.{col_end}"
+
+    def auto_fill_student(self):
+        if not self.require_grading_db():
+            return
+        if not self.selected_student_id:
+            messagebox.showinfo("Missing", "Select a student first.")
+            return
+        qids = self._all_question_ids()
+        if not qids:
+            messagebox.showinfo("Missing", "Load a rubric scheme first.")
+            return
+
+        rationale = "AutoFill draft: assigned full marks by default. Please review and adjust as needed."
+        with self.grade_con:
+            for qid in qids:
+                cols = fetch_columns_for_question(self.grade_con, qid)
+                for col_key, _group, text, mx in cols:
+                    pts = float(mx or 0.0)
+                    upsert_score(self.grade_con, self.selected_student_id, qid, col_key, pts, f"AutoFill full credit for: {text}", commit=False)
+                total_q = compute_total(self.grade_con, self.selected_student_id, qid)
+                upsert_student_note(self.grade_con, self.selected_student_id, qid, rationale, overall_grade=total_q, commit=False)
+            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=True, reviewed=False, commit=False)
+
+        self.load_student_question_view()
+        self.refresh_summary()
+        self.refresh_progress_tab()
+        messagebox.showinfo("AutoFill", "AutoFill applied across all rubric rows. Mark reviewed after checking.")
+
+    def auto_grade_files_for_student(self):
         if not self.require_grading_db():
             return
         if not self.selected_student_id:
             messagebox.showinfo("Missing", "Select a student first.")
             return
 
-        min_v = simpledialog.askfloat("Random fill", "Minimum score ratio (0..1)", initialvalue=0.5, minvalue=0.0, maxvalue=1.0)
-        if min_v is None:
-            return
-        max_v = simpledialog.askfloat("Random fill", "Maximum score ratio (0..1)", initialvalue=1.0, minvalue=0.0, maxvalue=1.0)
-        if max_v is None:
-            return
-        if max_v < min_v:
-            min_v, max_v = max_v, min_v
-
-        all_question_ids = list(self.question_map.keys())
-        if not all_question_ids:
+        qids = self._all_question_ids()
+        if not qids:
             messagebox.showinfo("Missing", "Load a rubric scheme first.")
             return
-        with self.grade_con:
-            for qid in all_question_ids:
-                cols = fetch_columns_for_question(self.grade_con, qid)
-                for col_key, _group, _text, mx in cols:
-                    mx = float(mx or 0.0)
-                    pts = round(random.uniform(min_v * mx, max_v * mx), 2) if mx > 0 else 0.0
-                    upsert_score(self.grade_con, self.selected_student_id, qid, col_key, pts, "Random fill", commit=False)
 
-            total = compute_total(self.grade_con, self.selected_student_id, None)
-            rationale = self.rationale_text.get("1.0", tk.END).strip()
-            for qid in all_question_ids:
-                upsert_student_note(self.grade_con, self.selected_student_id, qid, rationale, overall_grade=total, commit=False)
-            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=False, commit=False)
+        merged_code, file_map = self._merged_code_and_file_map(self.selected_student_id)
+        theme = self.theme_text.get("1.0", tk.END).strip()
+
+        with self.grade_con:
+            for qid in qids:
+                cols = fetch_columns_for_question(self.grade_con, qid)
+                rubric_items = [{"col_key": col_key, "group": (group or ""), "criterion": text, "max_points": float(mx)}
+                                for col_key, group, text, mx in cols]
+                try:
+                    res = self.auto_grader.auto_grade(question_id=qid, merged_code=merged_code, rubric_items=rubric_items, theme_text=theme)
+                except Exception as e:
+                    messagebox.showerror("Auto grade failed", f"Question {qid}: {e}")
+                    return
+
+                score_map = {x.get("col_key"): x.get("points", 0.0) for x in res.get("scores", []) if x.get("col_key")}
+                note_map = {x.get("col_key"): x.get("note", "") for x in res.get("scores", []) if x.get("col_key")}
+                max_map = {k: float(mx) for (k, _g, _t, mx) in cols}
+                for col_key in max_map.keys():
+                    pts = float(score_map.get(col_key, 0.0))
+                    pts = clamp_points(pts, max_map[col_key])
+                    upsert_score(self.grade_con, self.selected_student_id, qid, col_key, pts, note_map.get(col_key, ""), commit=False)
+
+                rationale = (res.get("rationale") or "").strip() or f"Auto-graded draft for {qid}."
+                total_q = compute_total(self.grade_con, self.selected_student_id, qid)
+                upsert_student_note(self.grade_con, self.selected_student_id, qid, rationale, overall_grade=total_q, commit=False)
+
+                # save line-based code comments/highlights
+                for c in (res.get("comments") or []):
+                    try:
+                        line_no = int(c.get("line", 1))
+                    except Exception:
+                        line_no = 1
+                    txt = (c.get("comment") or "").strip()
+                    if not txt:
+                        continue
+                    for fp, content in file_map.items():
+                        if not content:
+                            continue
+                        sidx, eidx = self._line_to_index(content, line_no)
+                        add_code_comment(self.grade_con, self.selected_student_id, fp, sidx, eidx, f"[{qid}] {txt}", color="#FFE8A3")
+                        break
+
+            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=True, reviewed=False, commit=False)
+
         self.load_student_question_view()
         self.refresh_summary()
         self.refresh_progress_tab()
+        messagebox.showinfo("Auto-Grade Files", "Draft grading complete for all questions, with rationale, notes, and code comments. Please review.")
 
     # ---- theme ----
     def save_theme(self):
@@ -3809,6 +3935,7 @@ class App:
         rows = self.sub_con.execute("""
           SELECT s.student_id, s.student_name,
                  COALESCE(gp.graded,0),
+                 COALESCE(gp.reviewed,1),
                  (SELECT COUNT(DISTINCT rs.question_id) FROM rubric_scores rs WHERE rs.student_id=s.student_id AND rs.points IS NOT NULL),
                  (SELECT COUNT(DISTINCT sn.question_id) FROM student_notes sn WHERE sn.student_id=s.student_id AND TRIM(COALESCE(sn.rationale,''))<>''),
                  COALESCE(gp.first_graded_at,''),
@@ -3825,16 +3952,19 @@ class App:
         rows = self._fetch_progress_rows()
         total = len(rows)
         assessed = 0
-        for _sid, _name, graded, scored_q, rationale_q, _fg, _lu, _lq in rows:
+        reviewed_count = 0
+        for _sid, _name, graded, reviewed, scored_q, rationale_q, _fg, _lu, _lq in rows:
             if int(graded or 0) == 1:
                 assessed += 1
-        return total, assessed, max(0, total - assessed)
+            if int(reviewed or 0) == 1:
+                reviewed_count += 1
+        return total, assessed, reviewed_count, max(0, total - assessed)
 
-    def _update_student_progress_labels(self, total: int, assessed: int, left: int):
+    def _update_student_progress_labels(self, total: int, assessed: int, reviewed_count: int, left: int):
         self.progress_var.set(f"Progress: assessed {assessed}/{total} | left {left}")
         curve_k = float(self.curve_preview_var.get())
         self.main_menu_progress_var.set(
-            f"Students assessed: {assessed}/{total} | Left: {left} | Curve preview ×{curve_k:.2f}"
+            f"Students assessed: {assessed}/{total} | Left: {left} | Unreviewed auto: {max(0, assessed-reviewed_count)} | Curve preview ×{curve_k:.2f}"
         )
 
     def refresh_progress_tab(self):
@@ -3844,14 +3974,32 @@ class App:
             self.progress_tree.delete(item)
 
         rows = self._fetch_progress_rows()
-        for sid, sname, graded, scored_q, rationale_q, first_g, last_u, last_q in rows:
+        for sid, sname, graded, reviewed, scored_q, rationale_q, first_g, last_u, last_q in rows:
             self.progress_tree.insert("", "end", iid=sid, values=(
-                sid, sname, "YES" if int(graded or 0) == 1 else "NO", scored_q, rationale_q,
+                sid, sname, "YES" if int(graded or 0) == 1 else "NO", "YES" if int(reviewed or 0) == 1 else "NO", scored_q, rationale_q,
                 first_g or "-", last_u or "-", last_q or "-"
             ))
-        total, assessed, left = self._compute_progress_counts()
-        self.progress_header_lbl.config(text=f"Assessed {assessed}/{total} | Left {left}")
-        self._update_student_progress_labels(total, assessed, left)
+        total, assessed, reviewed_count, left = self._compute_progress_counts()
+        self.progress_header_lbl.config(text=f"Assessed {assessed}/{total} | Reviewed {reviewed_count} | Left {left}")
+        self._update_student_progress_labels(total, assessed, reviewed_count, left)
+
+    def mark_selected_student_reviewed(self, reviewed: bool = True):
+        sid = self.selected_student_id
+        if sid is None and hasattr(self, "progress_tree"):
+            sel = self.progress_tree.selection()
+            if sel:
+                sid = sel[0]
+        if not sid:
+            messagebox.showinfo("Select", "Select a student first.")
+            return
+        set_student_reviewed_flag(self.grade_con, sid, reviewed)
+        self.refresh_progress_tab()
+        self.refresh_summary()
+        if self.selected_student_id == sid:
+            g, rv, fg, lu, lq = load_grading_progress(self.grade_con, sid)
+            self.grade_meta_var.set(
+                f"Graded: {'YES' if int(g or 0)==1 else 'NO'} | Reviewed: {'YES' if int(rv or 0)==1 else 'NO'} | First graded: {fg or '-'} | Last updated: {lu or '-'} | Last question: {lq or '-'}"
+            )
 
     def set_selected_student_graded(self, graded: bool):
         if not hasattr(self, "progress_tree"):
@@ -3865,9 +4013,9 @@ class App:
         self.refresh_progress_tab()
         self.refresh_summary()
         if self.selected_student_id == sid:
-            g, fg, lu, lq = load_grading_progress(self.grade_con, sid)
+            g, rv, fg, lu, lq = load_grading_progress(self.grade_con, sid)
             self.grade_meta_var.set(
-                f"Graded: {'YES' if int(g or 0)==1 else 'NO'} | First graded: {fg or '-'} | Last updated: {lu or '-'} | Last question: {lq or '-'}"
+                f"Graded: {'YES' if int(g or 0)==1 else 'NO'} | Reviewed: {'YES' if int(rv or 0)==1 else 'NO'} | First graded: {fg or '-'} | Last updated: {lu or '-'} | Last question: {lq or '-'}"
             )
 
     # ---- students ----
@@ -3897,7 +4045,7 @@ class App:
             self.student_list.see(idx)
         else:
             self.selected_student_id = None
-            self.grade_meta_var.set("Graded: NO | First graded: - | Last updated: -")
+            self.grade_meta_var.set("Graded: NO | Reviewed: YES | First graded: - | Last updated: -")
 
         self.refresh_progress_tab()
 
@@ -3913,9 +4061,9 @@ class App:
         lab = row[1] if row else ""
         lab_txt = f" | Lab:{lab}" if lab else ""
         self.student_header.config(text=f"{sid} — {name}{lab_txt}")
-        graded, first_g, last_u, last_q = load_grading_progress(self.grade_con, sid)
+        graded, reviewed, first_g, last_u, last_q = load_grading_progress(self.grade_con, sid)
         self.grade_meta_var.set(
-            f"Graded: {'YES' if int(graded or 0)==1 else 'NO'} | First graded: {first_g or '-'} | Last updated: {last_u or '-'} | Last question: {last_q or '-'}"
+            f"Graded: {'YES' if int(graded or 0)==1 else 'NO'} | Reviewed: {'YES' if int(reviewed or 0)==1 else 'NO'} | First graded: {first_g or '-'} | Last updated: {last_u or '-'} | Last question: {last_q or '-'}"
         )
 
         files = get_student_files(self.sub_con, sid)
@@ -4080,15 +4228,15 @@ class App:
             total = compute_total(self.grade_con, self.selected_student_id, None)
             for qid in self.question_map.keys():
                 upsert_student_note(self.grade_con, self.selected_student_id, qid, rationale, overall_grade=total, commit=False)
-            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=False, commit=False)
+            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=True, reviewed=True, commit=False)
 
         self.total_lbl.config(text=f"Overall Total: {total:g}")
         self.refresh_summary()
         self.refresh_progress_tab()
         if self.selected_student_id:
-            graded, first_g, last_u, last_q = load_grading_progress(self.grade_con, self.selected_student_id)
+            graded, reviewed, first_g, last_u, last_q = load_grading_progress(self.grade_con, self.selected_student_id)
             self.grade_meta_var.set(
-                f"Graded: {'YES' if int(graded or 0)==1 else 'NO'} | First graded: {first_g or '-'} | Last updated: {last_u or '-'} | Last question: {last_q or '-'}"
+                f"Graded: {'YES' if int(graded or 0)==1 else 'NO'} | Reviewed: {'YES' if int(reviewed or 0)==1 else 'NO'} | First graded: {first_g or '-'} | Last updated: {last_u or '-'} | Last question: {last_q or '-'}"
             )
         if show_message:
             messagebox.showinfo("Saved", "Saved scores + rationale for all rubric questions.")
@@ -4108,7 +4256,7 @@ class App:
         theme = self.theme_text.get("1.0", tk.END).strip()
 
         try:
-            res = self.auto_grader.auto_grade(merged_code=merged_code, rubric_items=rubric_items, theme_text=theme)
+            res = self.auto_grader.auto_grade(question_id=self.selected_question_id, merged_code=merged_code, rubric_items=rubric_items, theme_text=theme)
         except Exception as e:
             messagebox.showerror("Auto grade failed", str(e))
             return
@@ -4127,7 +4275,7 @@ class App:
             rationale = (res.get("rationale") or "").strip()
             total = compute_total(self.grade_con, self.selected_student_id, self.selected_question_id)
             upsert_student_note(self.grade_con, self.selected_student_id, self.selected_question_id, rationale, overall_grade=total, commit=False)
-            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=False, commit=False)
+            upsert_grading_progress(self.grade_con, self.selected_student_id, self.selected_question_id, mark_graded=True, reviewed=False, commit=False)
 
         self.load_student_question_view()
         self.refresh_summary()
@@ -4264,7 +4412,7 @@ class App:
                 self.sum_tree.delete(item)
             self.class_stats_lbl.config(text="Class: avg - | min - | max - | curve -")
             self.summary_stats_lbl.config(text="Assessed 0/0 | Left 0")
-            self._update_student_progress_labels(0, 0, 0)
+            self._update_student_progress_labels(0, 0, 0, 0)
             self.refresh_histogram()
             self.refresh_progress_tab()
             return
