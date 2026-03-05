@@ -3125,6 +3125,7 @@ class App:
         self.pdf_content_rationale_var = tk.BooleanVar(value=True)
         self.pdf_content_highlights_var = tk.BooleanVar(value=True)
         self.pdf_content_full_code_var = tk.BooleanVar(value=True)
+        self.auto_grade_write_highlights_var = tk.BooleanVar(value=False)
         self.last_auto_grade_trace = {"prompt": "", "result": "", "source": ""}
 
         self.db_table_pick_var = tk.StringVar(value="")
@@ -3695,18 +3696,23 @@ class App:
         auto_box.columnconfigure(0, weight=1)
         auto_box.rowconfigure(1, weight=1)
         ttk.Label(auto_box, text="Grading preflight settings", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            auto_box,
+            text="Auto Grade writes code highlights/comments",
+            variable=self.auto_grade_write_highlights_var,
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.theme_settings_text = tk.Text(auto_box, height=5, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
-        self.theme_settings_text.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        self.theme_settings_text.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
         self.theme_settings_text.insert("1.0", DEFAULT_THEME)
 
         leniency_row = ttk.Frame(auto_box, style="PastelCard.TFrame")
-        leniency_row.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        leniency_row.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(leniency_row, text="Leniency", style="PastelCard.TLabel").pack(side=tk.LEFT)
         ttk.Scale(leniency_row, from_=-1.0, to=1.0, variable=self.leniency_level_var, command=lambda _v: self._on_leniency_change()).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(8, 0))
-        ttk.Label(auto_box, textvariable=self.leniency_label_var, style="PastelCard.TLabel").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(auto_box, textvariable=self.leniency_label_var, style="PastelCard.TLabel").grid(row=4, column=0, sticky="w", pady=(6, 0))
 
         preflight_btns = ttk.Frame(auto_box, style="PastelCard.TFrame")
-        preflight_btns.grid(row=4, column=0, sticky="w", pady=(8, 0))
+        preflight_btns.grid(row=5, column=0, sticky="w", pady=(8, 0))
         ttk.Button(preflight_btns, text="Apply to Grade tab", command=lambda: self._current_theme_instructions(source="settings")).pack(side=tk.LEFT)
         ttk.Button(preflight_btns, text="Save theme + leniency", command=lambda: self.save_theme(source="settings")).pack(side=tk.LEFT, padx=6)
 
@@ -3733,6 +3739,7 @@ class App:
             "pdf_content_rationale": bool(self.pdf_content_rationale_var.get()),
             "pdf_content_highlights": bool(self.pdf_content_highlights_var.get()),
             "pdf_content_full_code": bool(self.pdf_content_full_code_var.get()),
+            "auto_grade_write_highlights": bool(self.auto_grade_write_highlights_var.get()),
             "leniency_level": float(self.leniency_level_var.get()),
         }
         meta_set(self.grade_con, "ui_preferences", json.dumps(prefs))
@@ -3767,6 +3774,7 @@ class App:
         self.pdf_content_rationale_var.set(bool(prefs.get("pdf_content_rationale", True)))
         self.pdf_content_highlights_var.set(bool(prefs.get("pdf_content_highlights", True)))
         self.pdf_content_full_code_var.set(bool(prefs.get("pdf_content_full_code", True)))
+        self.auto_grade_write_highlights_var.set(bool(prefs.get("auto_grade_write_highlights", False)))
         try:
             self.leniency_level_var.set(max(-1.0, min(1.0, float(prefs.get("leniency_level", 0.0)))))
         except Exception:
@@ -4677,20 +4685,21 @@ class App:
             total_q = compute_total(self.grade_con, sid, qid)
             upsert_student_note(self.grade_con, sid, qid, rationale, overall_grade=total_q, commit=False)
 
-            for c in (res.get("comments") or []):
-                try:
-                    line_no = int(c.get("line", 1))
-                except Exception:
-                    line_no = 1
-                txt = (c.get("comment") or "").strip()
-                if not is_mistake_focused_comment(txt):
-                    continue
-                for fp, local_line in self._resolve_comment_targets(line_no, line_ranges, file_map):
-                    content = file_map.get(fp, "")
-                    if not content:
+            if self.auto_grade_write_highlights_var.get():
+                for c in (res.get("comments") or []):
+                    try:
+                        line_no = int(c.get("line", 1))
+                    except Exception:
+                        line_no = 1
+                    txt = (c.get("comment") or "").strip()
+                    if not is_mistake_focused_comment(txt):
                         continue
-                    sidx, eidx = self._line_to_index(content, local_line)
-                    add_code_comment(self.grade_con, sid, fp, sidx, eidx, f"[{qid}] {txt}", color="#FFE8A3")
+                    for fp, local_line in self._resolve_comment_targets(line_no, line_ranges, file_map):
+                        content = file_map.get(fp, "")
+                        if not content:
+                            continue
+                        sidx, eidx = self._line_to_index(content, local_line)
+                        add_code_comment(self.grade_con, sid, fp, sidx, eidx, f"[{qid}] {txt}", color="#FFE8A3")
 
         upsert_grading_progress(self.grade_con, sid, self.selected_question_id, mark_graded=True, reviewed=False, commit=False)
 
