@@ -3744,10 +3744,16 @@ class App:
         if not self.require_grading_db():
             return
         prompt = self.auto_prompt_text_widget.get("1.0", tk.END).strip() if self.auto_prompt_text_widget else ""
+        raw_key = self.gpt_api_key_var.get().strip()
+        remote_enabled = self.gpt_remote_enabled_var.get().strip() == "1"
+        # If an API key is provided, prefer enabling remote mode automatically.
+        # This avoids a confusing state where a saved key still leaves chat/scoring in local fallback mode.
+        remote_enabled = remote_enabled or bool(raw_key)
         meta_set(self.grade_con, "gpt_api_key", self.gpt_api_key_var.get().strip())
         meta_set(self.grade_con, "gpt_model", self.gpt_model_var.get().strip() or "gpt-4.1-mini")
         meta_set(self.grade_con, "gpt_prompt", prompt)
-        meta_set(self.grade_con, "gpt_remote_enabled", "1" if self.gpt_remote_enabled_var.get().strip() == "1" else "0")
+        meta_set(self.grade_con, "gpt_remote_enabled", "1" if remote_enabled else "0")
+        self.gpt_remote_enabled_var.set("1" if remote_enabled else "0")
         self._refresh_gpt_client()
         messagebox.showinfo("Saved", "GPT settings saved.")
 
@@ -3764,7 +3770,12 @@ class App:
         self._refresh_gpt_client()
 
     def _refresh_gpt_client(self):
-        key = self.gpt_api_key_var.get().strip() if self.gpt_remote_enabled_var.get().strip() == "1" else ""
+        raw_key = self.gpt_api_key_var.get().strip()
+        remote_enabled = self.gpt_remote_enabled_var.get().strip() == "1"
+        # Be forgiving: if a key exists, use it even when the legacy 1/0 toggle was left at 0.
+        key = raw_key if (remote_enabled or raw_key) else ""
+        if key and not remote_enabled:
+            self.gpt_remote_enabled_var.set("1")
         prompt = self.auto_prompt_text_widget.get("1.0", tk.END).strip() if self.auto_prompt_text_widget else ""
         self.gpt_tester = GPT_test(api_key=key, model=self.gpt_model_var.get().strip() or "gpt-4.1-mini", system_prompt=prompt)
         self.auto_grader = AutoGrader(self.gpt_tester)
