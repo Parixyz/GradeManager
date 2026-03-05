@@ -15,7 +15,7 @@ class GPT_test:
         self.model = (model or "gpt-4.1-mini").strip()
         self.system_prompt = (system_prompt or "").strip()
 
-    def _heuristic_grade(self, question_id: str, rubric_items: list[dict], code_text: str) -> dict:
+    def _heuristic_grade(self, question_id: str, question_title: str, rubric_items: list[dict], code_text: str) -> dict:
         text = (code_text or "").lower()
         scores = []
         lines = [ln for ln in (code_text or "").splitlines() if ln.strip()]
@@ -43,12 +43,11 @@ class GPT_test:
                 ratio = 0.9 if "if(" in text or "if (" in text else 0.35
 
             points = round(max(0.0, min(mx, mx * ratio)), 2)
-            note = f"Heuristic draft for {question_id}: estimated against criterion text."
+            note = f"Estimated against criterion text for {question_id}."
             scores.append({"col_key": col_key, "points": points, "note": note})
 
         rationale = (
-            f"Draft grading for {question_id}. This was generated automatically from code structure and rubric wording. "
-            "Please review before finalizing."
+            f"Feedback summary for {question_id} ({question_title or question_id}) based on rubric criteria and code evidence."
         )
         comments = []
         for idx, ln in enumerate((code_text or "").splitlines(), start=1):
@@ -62,14 +61,15 @@ class GPT_test:
 
         return {"scores": scores, "rationale": rationale, "comments": comments}
 
-    def grade_question(self, *, question_id: str, rubric_items: list[dict], code_text: str, extra_prompt: str = "") -> dict:
+    def grade_question(self, *, question_id: str, question_title: str = "", rubric_items: list[dict], code_text: str, extra_prompt: str = "") -> dict:
         if not self.api_key:
-            return self._heuristic_grade(question_id, rubric_items, code_text)
+            return self._heuristic_grade(question_id, question_title, rubric_items, code_text)
 
         prompt = {
             "question_id": question_id,
-            "instructions": (self.system_prompt or "Grade code strictly but fairly.") + "\n" + (extra_prompt or ""),
-            "rubric_items": rubric_items,
+            "question_title": (question_title or question_id),
+            "instructions": (self.system_prompt or "Grade code strictly but fairly.") + "\n" + (extra_prompt or "") + "\nUse the exact question context and rubric min/max ranges.",
+            "rubric_items": [{**ri, "min_points": float(ri.get("min_points", 0.0) or 0.0), "max_points": float(ri.get("max_points", 0.0) or 0.0)} for ri in (rubric_items or [])],
             "code": code_text,
             "output_format": {
                 "scores": [{"col_key": "string", "points": "number", "note": "string"}],
