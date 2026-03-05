@@ -3061,6 +3061,7 @@ class App:
         self.tab_progress = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_regex = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_ai_trace = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
+        self.tab_settings = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_pdf_menu = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_db = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
 
@@ -3070,6 +3071,7 @@ class App:
         self.nb.add(self.tab_progress, text="Progress")
         self.nb.add(self.tab_regex, text="Regex / Patterns")
         self.nb.add(self.tab_ai_trace, text="AI Prompt + Chat")
+        self.nb.add(self.tab_settings, text="Settings")
         self.nb.add(self.tab_pdf_menu, text="PDF Menu")
         self.nb.add(self.tab_db, text="DB Browser")
 
@@ -3079,10 +3081,12 @@ class App:
         self._build_progress_tab()
         self._build_regex_tab()
         self._build_ai_trace_tab()
+        self._build_settings_hub_tab()
         self._build_pdf_menu_tab()
         self._build_db_tab()
         self._ensure_default_regex_profile()
         self.load_gpt_settings()
+        self.load_ui_preferences()
         self.reset_session_timer()
 
     def _build_grade_tab(self):
@@ -3411,7 +3415,97 @@ class App:
         if not bundle:
             messagebox.showinfo("Missing", "Build a bundle first.")
             return
-        self._send_to_chat(bundle, "", "You (bundle)")
+        self._send_to_chat(
+            "Please review the attached grading bundle and suggest fixes/improvements.",
+            bundle,
+            "You (bundle)",
+        )
+
+    def _build_settings_hub_tab(self):
+        self.tab_settings.columnconfigure(0, weight=1)
+        self.tab_settings.rowconfigure(0, weight=1)
+
+        wrap = ttk.Frame(self.tab_settings, style="Pastel.TFrame")
+        wrap.grid(row=0, column=0, sticky="nsew")
+        wrap.columnconfigure(0, weight=1)
+        wrap.rowconfigure(0, weight=1)
+        wrap.rowconfigure(1, weight=1)
+        wrap.rowconfigure(2, weight=0)
+
+        include_box = ttk.Frame(wrap, style="PastelCard.TFrame", padding=10)
+        include_box.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        ttk.Label(include_box, text="Chat bundle include settings", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Checkbutton(include_box, text="Include student code", variable=self.chat_include_code_var).pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(include_box, text="Include rubric scheme", variable=self.chat_include_scheme_var).pack(anchor="w")
+        ttk.Checkbutton(include_box, text="Include prompt process + output", variable=self.chat_include_prompt_var).pack(anchor="w")
+        ttk.Checkbutton(include_box, text="Compact code before bundling", variable=self.chat_compact_code_var).pack(anchor="w")
+
+        chars_row = ttk.Frame(include_box, style="PastelCard.TFrame")
+        chars_row.pack(anchor="w", pady=(8, 0))
+        ttk.Label(chars_row, text="Code char limit", style="PastelCard.TLabel").pack(side=tk.LEFT)
+        ttk.Entry(chars_row, textvariable=self.chat_code_char_limit_var, width=10).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Checkbutton(include_box, text="Auto-refresh bundle", variable=self.chat_auto_bundle_var).pack(anchor="w", pady=(8, 0))
+
+        pdf_box = ttk.Frame(wrap, style="PastelCard.TFrame", padding=10)
+        pdf_box.grid(row=1, column=0, sticky="nsew")
+        ttk.Label(pdf_box, text="PDF output settings", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Checkbutton(pdf_box, text="Include student PDF", variable=self.pdf_menu_include_student_var).pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(pdf_box, text="Include summary PDF", variable=self.pdf_menu_include_summary_var).pack(anchor="w")
+        ttk.Checkbutton(pdf_box, text="Include all student PDFs", variable=self.pdf_menu_include_batch_var).pack(anchor="w")
+        tag_row = ttk.Frame(pdf_box, style="PastelCard.TFrame")
+        tag_row.pack(anchor="w", pady=(8, 0))
+        ttk.Label(tag_row, text="Batch tag", style="PastelCard.TLabel").pack(side=tk.LEFT)
+        ttk.Entry(tag_row, textvariable=self.pdf_menu_batch_tag_var, width=24).pack(side=tk.LEFT, padx=(8, 0))
+
+        btns = ttk.Frame(wrap, style="Pastel.TFrame")
+        btns.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(btns, text="Save UI Settings", command=self.save_ui_preferences).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Reload UI Settings", command=self.load_ui_preferences).pack(side=tk.LEFT, padx=6)
+
+    def save_ui_preferences(self):
+        if not self.require_grading_db():
+            return
+        prefs = {
+            "chat_auto_bundle": bool(self.chat_auto_bundle_var.get()),
+            "chat_include_code": bool(self.chat_include_code_var.get()),
+            "chat_include_scheme": bool(self.chat_include_scheme_var.get()),
+            "chat_include_prompt": bool(self.chat_include_prompt_var.get()),
+            "chat_compact_code": bool(self.chat_compact_code_var.get()),
+            "chat_code_char_limit": int(self.chat_code_char_limit_var.get() or 7000),
+            "pdf_include_student": bool(self.pdf_menu_include_student_var.get()),
+            "pdf_include_summary": bool(self.pdf_menu_include_summary_var.get()),
+            "pdf_include_batch": bool(self.pdf_menu_include_batch_var.get()),
+            "pdf_batch_tag": self.pdf_menu_batch_tag_var.get().strip() or "Midterm",
+        }
+        meta_set(self.grade_con, "ui_preferences", json.dumps(prefs))
+        self.refresh_chat_preview()
+        messagebox.showinfo("Saved", "UI settings saved.")
+
+    def load_ui_preferences(self):
+        if not self.require_grading_db():
+            return
+        raw = meta_get(self.grade_con, "ui_preferences", "")
+        if not raw:
+            return
+        try:
+            prefs = json.loads(raw)
+        except Exception:
+            return
+
+        self.chat_auto_bundle_var.set(bool(prefs.get("chat_auto_bundle", True)))
+        self.chat_include_code_var.set(bool(prefs.get("chat_include_code", True)))
+        self.chat_include_scheme_var.set(bool(prefs.get("chat_include_scheme", True)))
+        self.chat_include_prompt_var.set(bool(prefs.get("chat_include_prompt", True)))
+        self.chat_compact_code_var.set(bool(prefs.get("chat_compact_code", True)))
+        try:
+            self.chat_code_char_limit_var.set(max(1000, int(prefs.get("chat_code_char_limit", 7000))))
+        except Exception:
+            self.chat_code_char_limit_var.set(7000)
+        self.pdf_menu_include_student_var.set(bool(prefs.get("pdf_include_student", True)))
+        self.pdf_menu_include_summary_var.set(bool(prefs.get("pdf_include_summary", True)))
+        self.pdf_menu_include_batch_var.set(bool(prefs.get("pdf_include_batch", False)))
+        self.pdf_menu_batch_tag_var.set((prefs.get("pdf_batch_tag") or "Midterm").strip() or "Midterm")
+        self.refresh_chat_preview()
 
     def clear_chat_transcript(self):
         if self.chat_transcript_widget is not None:
