@@ -1511,6 +1511,20 @@ class PDFExporter:
             story.append(Paragraph(f"<b>LabID:</b> {lab}", styles["Normal"]))
         overall = compute_overall_total(self.grade_con, sid)
         story.append(Paragraph(f"<b>Overall total:</b> {overall:g}", styles["Normal"]))
+        display_qids = fetch_display_question_ids(self.grade_con)
+        if display_qids:
+            breakdown = " | ".join([f"{qid}: {compute_total_by_display_id(self.grade_con, sid, qid):g}" for qid in display_qids])
+            story.append(Paragraph(f"<b>Totals by Question ID:</b> {breakdown}", styles["Normal"]))
+        single_rationale = ""
+        for qid in self.question_map.keys():
+            note_row = load_student_note(self.grade_con, sid, qid)
+            if note_row and (note_row[0] or "").strip():
+                single_rationale = (note_row[0] or "").strip()
+                break
+        if self.student_pdf_options["include_rationale"] and single_rationale:
+            story.append(Spacer(1, 8))
+            story.append(Paragraph("<b>Rationale</b>", styles["Heading3"]))
+            story.append(Paragraph(single_rationale.replace("\n", "<br/>"), styles["Normal"]))
         story.append(Spacer(1, 12))
 
         # Per-question grading details (grouped by display/sub question id)
@@ -1568,13 +1582,6 @@ class PDFExporter:
                     ("BOTTOMPADDING", (0,0), (-1,-1), 3),
                 ]))
                 story.append(tbl)
-                story.append(Spacer(1, 10))
-
-            note_row = load_student_note(self.grade_con, sid, members[0])
-            rationale = note_row[0] if note_row and note_row[0] else ""
-            if self.student_pdf_options["include_rationale"] and rationale:
-                story.append(Paragraph("<b>Rationale</b>", styles["Heading3"]))
-                story.append(Paragraph(rationale.replace("\n", "<br/>"), styles["Normal"]))
                 story.append(Spacer(1, 10))
 
         if self.student_pdf_options["include_comment_highlights"]:
@@ -3329,7 +3336,7 @@ class App:
         right = ttk.Frame(main, style="PastelCard.TFrame", padding=10)
         right.grid(row=0, column=2, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(15, weight=1)
+        right.rowconfigure(12, weight=1)
 
         ttk.Label(right, text="Questions: all loaded rubric questions", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
         self.question_mode_lbl = ttk.Label(right, text="Rubric below shows all questions (question picker removed)", style="PastelCard.TLabel")
@@ -3337,22 +3344,31 @@ class App:
 
         ttk.Separator(right, orient="horizontal").grid(row=4, column=0, sticky="ew", pady=(8,10))
 
-        ttk.Label(right, text="Theme / Instructions (saved in DB)", style="PastelCard.TLabel").grid(row=5, column=0, sticky="w", pady=(10, 0))
-        self.theme_text = tk.Text(right, height=4,
+        settings_tabs = ttk.Notebook(right)
+        settings_tabs.grid(row=5, column=0, sticky="ew")
+
+        theme_tab = ttk.Frame(settings_tabs, style="PastelCard.TFrame", padding=8)
+        rationale_tab = ttk.Frame(settings_tabs, style="PastelCard.TFrame", padding=8)
+        theme_tab.columnconfigure(0, weight=1)
+        rationale_tab.columnconfigure(0, weight=1)
+        settings_tabs.add(theme_tab, text="Theme + Buttons")
+        settings_tabs.add(rationale_tab, text="Rationale")
+
+        ttk.Label(theme_tab, text="Theme / Instructions (saved in DB)", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
+        self.theme_text = tk.Text(theme_tab, height=4,
                                   bg="#FFFDF7", fg=self.palette["text"],
                                   insertbackground=self.palette["text"],
                                   highlightthickness=1, highlightbackground="#E8E1FF")
-        self.theme_text.grid(row=6, column=0, sticky="nsew")
+        self.theme_text.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         self.theme_text.insert("1.0", DEFAULT_THEME)
 
-        leniency_row = ttk.Frame(right, style="PastelCard.TFrame")
-        leniency_row.grid(row=7, column=0, sticky="ew", pady=(8, 0))
+        leniency_row = ttk.Frame(theme_tab, style="PastelCard.TFrame")
+        leniency_row.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(leniency_row, textvariable=self.leniency_label_var, style="PastelCard.TLabel").pack(side=tk.LEFT)
         ttk.Scale(leniency_row, from_=-1.0, to=1.0, variable=self.leniency_level_var, command=lambda _v: self._on_leniency_change()).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(8, 0))
 
-        btns = ttk.Frame(right, style="PastelCard.TFrame")
-        btns.grid(row=8, column=0, sticky="ew", pady=(8, 8))
-
+        btns = ttk.Frame(theme_tab, style="PastelCard.TFrame")
+        btns.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         ttk.Button(btns, text="Save Theme", command=lambda: self.save_theme(source="grade")).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(btns, text="AutoFill", command=self.auto_fill_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Grade Files", command=self.auto_grade_files_for_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
@@ -3362,27 +3378,29 @@ class App:
         ttk.Button(btns, text="Mark Reviewed", command=self.mark_selected_student_reviewed).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Export Grade (selected student)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
 
-        ttk.Label(right, text="Rationale (applied to all questions for this student)", style="PastelCard.TLabel").grid(row=9, column=0, sticky="w")
-        self.rationale_text = tk.Text(right, height=6,
+        ttk.Label(rationale_tab, text="Rationale (single note for this student)", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
+        self.rationale_text = tk.Text(rationale_tab, height=7,
                                       bg="#FFFDF7", fg=self.palette["text"],
                                       insertbackground=self.palette["text"],
                                       highlightthickness=1, highlightbackground="#E8E1FF")
-        self.rationale_text.grid(row=10, column=0, sticky="nsew")
+        self.rationale_text.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         self.rationale_text.bind("<KeyRelease>", lambda _e: self.schedule_auto_save())
         self.rationale_text.bind("<FocusOut>", lambda _e: self.schedule_auto_save())
 
         self.total_lbl = ttk.Label(right, text="Overall Total: -", style="PastelCard.TLabel", font=("Segoe UI", 11, "bold"))
-        self.total_lbl.grid(row=11, column=0, sticky="w", pady=(6, 6))
+        self.total_lbl.grid(row=6, column=0, sticky="w", pady=(6, 2))
+        self.per_question_total_lbl = ttk.Label(right, text="By Question ID: -", style="PastelCard.TLabel", font=("Segoe UI", 9))
+        self.per_question_total_lbl.grid(row=7, column=0, sticky="w", pady=(0, 6))
 
-        ttk.Label(right, text="Rubric Table (all questions)", style="PastelCard.TLabel").grid(row=12, column=0, sticky="w")
+        ttk.Label(right, text="Rubric Table (all questions)", style="PastelCard.TLabel").grid(row=8, column=0, sticky="w")
         self.rubric_grid = ScrollableRubricGrid(right)
         self.rubric_grid.set_change_callback(self.schedule_auto_save)
-        self.rubric_grid.grid(row=13, column=0, sticky="nsew")
+        self.rubric_grid.grid(row=9, column=0, sticky="nsew")
 
-        ttk.Label(right, text="Code comments (this file)", style="PastelCard.TLabel").grid(row=14, column=0, sticky="w", pady=(10,0))
+        ttk.Label(right, text="Code comments (this file)", style="PastelCard.TLabel").grid(row=10, column=0, sticky="w", pady=(10,0))
         self.comment_list = tk.Listbox(right, height=7, bg=self.palette["panel"], fg=self.palette["text"],
                                        highlightthickness=0, selectbackground=self.palette["select"])
-        self.comment_list.grid(row=15, column=0, sticky="nsew")
+        self.comment_list.grid(row=11, column=0, sticky="nsew")
 
     def _current_theme_instructions(self, source: str = "auto") -> str:
         grade_theme = self.theme_text.get("1.0", tk.END).strip() if self.theme_text is not None else ""
@@ -5112,11 +5130,31 @@ class App:
         delete_code_comments_in_range(self.grade_con, self.selected_student_id, self.selected_file_path, sidx, eidx)
         self._apply_comments_highlights()
 
+    def _get_single_student_rationale(self, student_id: str) -> str:
+        if not self.grade_con or not student_id:
+            return ""
+        for qid in self.question_map.keys():
+            note_row = load_student_note(self.grade_con, student_id, qid)
+            rationale = (note_row[0] if note_row else "") or ""
+            if rationale.strip():
+                return rationale.strip()
+        return ""
+
+    def _format_display_question_totals(self, student_id: str) -> str:
+        if not self.grade_con or not student_id:
+            return "By Question ID: -"
+        qids = fetch_display_question_ids(self.grade_con)
+        if not qids:
+            return "By Question ID: -"
+        bits = [f"{qid}: {compute_total_by_display_id(self.grade_con, student_id, qid):g}" for qid in qids]
+        return "By Question ID: " + " | ".join(bits)
+
     # ---- load rubric table for selected student (all questions) ----
     def load_student_question_view(self):
         self._suspend_auto_save = True
         self.rationale_text.delete("1.0", tk.END)
         self.total_lbl.config(text="Overall Total: -")
+        self.per_question_total_lbl.config(text="By Question ID: -")
         self.rubric_grid.build([])
 
         if self.grade_con is None:
@@ -5131,7 +5169,6 @@ class App:
 
         combined_scores = {}
         combined_notes = {}
-        rationale_blocks = []
         for qid in self.question_map.keys():
             score_map, note_map = load_student_scores(self.grade_con, self.selected_student_id, qid)
             for ui_key, (qid2, col_key) in self._rubric_ui_map.items():
@@ -5139,16 +5176,14 @@ class App:
                     combined_scores[ui_key] = score_map.get(col_key)
                     combined_notes[ui_key] = note_map.get(col_key, "")
 
-            note_row = load_student_note(self.grade_con, self.selected_student_id, qid)
-            if note_row and (note_row[0] or "").strip():
-                rationale_blocks.append(f"[{qid}]\n{note_row[0].strip()}")
-
         self.rubric_grid.set_values(combined_scores, combined_notes)
-        if rationale_blocks:
-            self.rationale_text.insert("1.0", "\n\n".join(rationale_blocks))
+        rationale = self._get_single_student_rationale(self.selected_student_id)
+        if rationale:
+            self.rationale_text.insert("1.0", rationale)
 
         total = compute_total(self.grade_con, self.selected_student_id, None)
         self.total_lbl.config(text=f"Overall Total: {total:g}")
+        self.per_question_total_lbl.config(text=self._format_display_question_totals(self.selected_student_id))
         self._suspend_auto_save = False
 
     # ---- save ----
@@ -5195,7 +5230,7 @@ class App:
                 f"Graded: {'YES' if int(graded or 0)==1 else 'NO'} | Reviewed: {'YES' if int(reviewed or 0)==1 else 'NO'} | First graded: {first_g or '-'} | Last updated: {last_u or '-'} | Last question: {last_q or '-'}"
             )
         if show_message:
-            messagebox.showinfo("Saved", "Saved scores + rationale for all rubric questions.")
+            messagebox.showinfo("Saved", "Saved scores + single rationale.")
 
 
     # ---- Optional auto grade (separate component) ----
