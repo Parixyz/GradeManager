@@ -3119,6 +3119,7 @@ class App:
         self._grade_last_file_selection: tuple[int, ...] = ()
 
         self._build_ui()
+        self._load_theme_and_leniency_from_db()
         self.refresh_students(keep_selected=False)
         self.root.after(120, self._poll_grade_selections)
 
@@ -3143,6 +3144,21 @@ class App:
             self.grade_db_path = self.sub_db_path
             grading_db_init(self.grade_con)
         return True
+
+    def _load_theme_and_leniency_from_db(self):
+        if not self.require_grading_db():
+            return
+        theme = meta_get(self.grade_con, "theme", DEFAULT_THEME)
+        self.theme_text.delete("1.0", tk.END)
+        self.theme_text.insert("1.0", theme)
+        if self.theme_settings_text is not None:
+            self.theme_settings_text.delete("1.0", tk.END)
+            self.theme_settings_text.insert("1.0", theme)
+        try:
+            self.leniency_level_var.set(max(-1.0, min(1.0, float(meta_get(self.grade_con, "leniency_level", "0") or 0.0))))
+        except Exception:
+            self.leniency_level_var.set(0.0)
+        self._on_leniency_change()
 
     def _build_ui(self):
         top = ttk.Frame(self.root, padding=10, style="Pastel.TFrame")
@@ -4245,17 +4261,7 @@ class App:
         self.sub_db_status_lbl.config(text=f"Submissions DB: {path.name}")
         self.db_status_lbl.config(text=f"Grading: integrated with {path.name}")
 
-        theme = meta_get(self.grade_con, "theme", DEFAULT_THEME)
-        self.theme_text.delete("1.0", tk.END)
-        self.theme_text.insert("1.0", theme)
-        if self.theme_settings_text is not None:
-            self.theme_settings_text.delete("1.0", tk.END)
-            self.theme_settings_text.insert("1.0", theme)
-        try:
-            self.leniency_level_var.set(max(-1.0, min(1.0, float(meta_get(self.grade_con, "leniency_level", "0") or 0.0))))
-        except Exception:
-            self.leniency_level_var.set(0.0)
-        self._on_leniency_change()
+        self._load_theme_and_leniency_from_db()
         self.load_gpt_settings()
         self.refresh_question_lists()
 
