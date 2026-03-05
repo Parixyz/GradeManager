@@ -902,6 +902,51 @@ def fetch_display_question_ids(con: sqlite3.Connection):
     """).fetchall()
     return [r[0] for r in rows if r and r[0]]
 
+
+def _question_label_token(value: str) -> str:
+    text = (value or "").strip().lower()
+    if not text:
+        return ""
+
+    m = re.search(r"(?:^|[^a-z0-9])(?:q|p)\s*0*(\d+)(?:[^a-z0-9]|$)", text)
+    if m:
+        return str(int(m.group(1)))
+
+    m = re.search(r"\d+", text)
+    if m:
+        return str(int(m.group(0)))
+    return ""
+
+
+def build_grade_column_question_map(grade_cols: list[str], question_ids: list[str]) -> dict[str, str]:
+    """
+    Map LMS '* Points Grade' columns to rubric display question IDs.
+    Prefer explicit number labels (Q1/P1 -> question 1), then fallback to position.
+    """
+    qid_by_token: dict[str, str] = {}
+    for qid in question_ids:
+        tok = _question_label_token(qid)
+        if tok and tok not in qid_by_token:
+            qid_by_token[tok] = qid
+
+    remaining = [qid for qid in question_ids]
+    out: dict[str, str] = {}
+    for idx, gcol in enumerate(grade_cols):
+        tok = _question_label_token(gcol)
+        mapped = qid_by_token.get(tok) if tok else None
+        if mapped and mapped in remaining:
+            out[gcol] = mapped
+            remaining.remove(mapped)
+            continue
+
+        if idx < len(question_ids):
+            fallback = question_ids[idx]
+            out[gcol] = fallback
+            if fallback in remaining:
+                remaining.remove(fallback)
+
+    return out
+
 def compute_overall_total(con: sqlite3.Connection, student_id: str) -> float:
     row = con.execute("""
       SELECT COALESCE(SUM(COALESCE(points,0)),0)
@@ -4095,6 +4140,7 @@ class App:
         if not question_ids:
             messagebox.showerror("No rubric", "No rubric questions found. Load scheme CSV first.")
             return
+        grade_col_to_qid = build_grade_column_question_map(grade_cols, question_ids)
 
         qmax = {qid: compute_question_max(self.grade_con, qid) for qid in question_ids}
         overall_max = sum(qmax.values())
@@ -4121,9 +4167,9 @@ class App:
                 continue
 
             matched_rows += 1
-            for idx, gcol in enumerate(grade_cols):
-                if idx < len(question_ids):
-                    qid = question_ids[idx]
+            for gcol in grade_cols:
+                qid = grade_col_to_qid.get(gcol)
+                if qid:
                     mx = qmax.get(qid, 0.0)
                     total = compute_total_by_display_id(self.grade_con, sid, qid)
                     pct = (total / mx * 100.0) if mx > 0 else 0.0
