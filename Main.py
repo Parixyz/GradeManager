@@ -47,7 +47,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import tkinter.font as tkfont
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 # PDF (optional)
 try:
@@ -3140,6 +3140,12 @@ class App:
         self.db_schema_text = None
         self.db_rows_tree = None
         self.db_rows_status_var = tk.StringVar(value="No table selected.")
+        self.upload_source_var = tk.StringVar(value="No upload file loaded.")
+        self.upload_result_var = tk.StringVar(value="Load a Brightspace/Excel grade file, then click Fill From Current Grades.")
+        self.upload_rows: list[dict] = []
+        self.upload_headers: list[str] = []
+        self.upload_file_path: Path | None = None
+        self.upload_unmatched_ids: list[str] = []
 
         # Auto-grader (heuristic + optional GPT)
         self.gpt_tester = GPT_test()
@@ -3247,6 +3253,7 @@ class App:
         self.tab_settings = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_pdf_menu = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_db = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
+        self.tab_upload = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
 
         self.nb.add(self.tab_grade, text="Grade")
         self.nb.add(self.tab_summary, text="Summary")
@@ -3257,6 +3264,7 @@ class App:
         self.nb.add(self.tab_settings, text="Settings")
         self.nb.add(self.tab_pdf_menu, text="PDF Menu")
         self.nb.add(self.tab_db, text="DB Browser")
+        self.nb.add(self.tab_upload, text="LMS Upload")
 
         self._build_grade_tab()
         self._build_summary_tab()
@@ -3267,6 +3275,7 @@ class App:
         self._build_settings_hub_tab()
         self._build_pdf_menu_tab()
         self._build_db_tab()
+        self._build_upload_tab()
         self._ensure_default_regex_profile()
         self.load_gpt_settings()
         self.load_ui_preferences()
@@ -3978,6 +3987,194 @@ class App:
             self.progress_tree.heading(c, text=c)
             self.progress_tree.column(c, width=w, anchor="w")
         self.progress_tree.pack(fill=tk.BOTH, expand=True, pady=(10,0))
+
+    def _build_upload_tab(self):
+        top = ttk.Frame(self.tab_upload, style="Pastel.TFrame")
+        top.pack(fill=tk.X)
+        ttk.Button(top, text="Load CSV/XLSX", command=self.load_upload_grade_file).pack(side=tk.LEFT)
+        ttk.Button(top, text="Fill From Current Grades (out of 100)", command=self.fill_upload_with_current_grades).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Save Filled File", command=self.save_filled_upload_file).pack(side=tk.LEFT)
+
+        ttk.Label(self.tab_upload, textvariable=self.upload_source_var, style="Pastel.TLabel").pack(anchor="w", pady=(8, 2))
+        ttk.Label(self.tab_upload, textvariable=self.upload_result_var, style="Pastel.TLabel").pack(anchor="w", pady=(0, 8))
+
+        self.upload_preview_tree = ttk.Treeview(self.tab_upload, show="headings", height=14)
+        self.upload_preview_tree.pack(fill=tk.BOTH, expand=True)
+
+        unmatched_box = ttk.LabelFrame(self.tab_upload, text="Student numbers not found in DB", padding=8)
+        unmatched_box.pack(fill=tk.BOTH, expand=False, pady=(8, 0))
+        self.upload_unmatched_list = tk.Listbox(unmatched_box, height=6, bg=self.palette["panel"], fg=self.palette["text"], highlightthickness=0)
+        self.upload_unmatched_list.pack(fill=tk.BOTH, expand=True)
+
+    def _read_upload_table(self, file_path: Path) -> tuple[list[str], list[dict]]:
+        ext = file_path.suffix.lower()
+        if ext == ".csv":
+            with open(file_path, "r", encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                headers = list(reader.fieldnames or [])
+                rows = [dict(r) for r in reader]
+            return headers, rows
+
+        if ext in {".xlsx", ".xlsm"}:
+            wb = load_workbook(file_path)
+            ws = wb.active
+            vals = list(ws.iter_rows(values_only=True))
+            if not vals:
+                return [], []
+            headers = [str(v).strip() if v is not None else "" for v in vals[0]]
+            rows = []
+            for row in vals[1:]:
+                rec = {}
+                for i, h in enumerate(headers):
+                    rec[h] = "" if i >= len(row) or row[i] is None else str(row[i])
+                rows.append(rec)
+            return headers, rows
+
+        raise ValueError("Only CSV or XLSX files are supported.")
+
+    def _refresh_upload_preview(self):
+        headers = self.upload_headers or []
+        grade_cols = [h for h in headers if "points grade" in h.lower()]
+        preferred = [h for h in ["OrgDefinedId", "Last Name", "First Name", *grade_cols] if h in headers]
+        visible_cols = preferred or headers[:8]
+
+        self.upload_preview_tree.configure(columns=visible_cols)
+        for c in visible_cols:
+            self.upload_preview_tree.heading(c, text=c)
+            self.upload_preview_tree.column(c, width=180 if c in {"Last Name", "First Name"} else 140, anchor="w")
+
+        for item in self.upload_preview_tree.get_children():
+            self.upload_preview_tree.delete(item)
+
+        for row in self.upload_rows[:500]:
+            self.upload_preview_tree.insert("", "end", values=[row.get(c, "") for c in visible_cols])
+
+        self.upload_unmatched_list.delete(0, tk.END)
+        for sid in self.upload_unmatched_ids:
+            self.upload_unmatched_list.insert(tk.END, sid)
+
+    def load_upload_grade_file(self):
+        fp = filedialog.askopenfilename(
+            title="Open LMS export file",
+            filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx *.xlsm")],
+        )
+        if not fp:
+            return
+        try:
+            headers, rows = self._read_upload_table(Path(fp))
+        except Exception as e:
+            messagebox.showerror("Load failed", str(e))
+            return
+
+        self.upload_file_path = Path(fp)
+        self.upload_headers = headers
+        self.upload_rows = rows
+        self.upload_unmatched_ids = []
+        self.upload_source_var.set(f"Loaded: {self.upload_file_path.name} | Rows: {len(rows)}")
+        self.upload_result_var.set("Loaded. Click Fill From Current Grades to write points-grade columns.")
+        self._refresh_upload_preview()
+
+    def fill_upload_with_current_grades(self):
+        if not self.require_grading_db():
+            return
+        if not self.upload_rows or not self.upload_headers:
+            messagebox.showinfo("Load file", "Load an LMS CSV/XLSX first.")
+            return
+
+        id_col = next((h for h in self.upload_headers if h.strip().lower() in {"orgdefinedid", "student id", "student_id"}), None)
+        if not id_col:
+            messagebox.showerror("Missing ID column", "Could not find OrgDefinedId/Student ID column in loaded file.")
+            return
+
+        grade_cols = [h for h in self.upload_headers if "points grade" in h.lower()]
+        if not grade_cols:
+            messagebox.showerror("Missing grade columns", "No '* Points Grade' columns were found in loaded file.")
+            return
+
+        question_ids = fetch_display_question_ids(self.grade_con)
+        if not question_ids:
+            messagebox.showerror("No rubric", "No rubric questions found. Load scheme CSV first.")
+            return
+
+        qmax = {qid: compute_question_max(self.grade_con, qid) for qid in question_ids}
+        overall_max = sum(qmax.values())
+
+        db_students = {
+            sid: sname
+            for sid, sname in self.sub_con.execute(
+                """
+                SELECT student_id, student_name
+                FROM students
+                WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
+                """
+            ).fetchall()
+            if sid
+        }
+
+        unmatched: list[str] = []
+        matched_rows = 0
+        for row in self.upload_rows:
+            sid = extract_numeric_id(str(row.get(id_col, "")))
+            if not sid or sid not in db_students:
+                if sid:
+                    unmatched.append(sid)
+                continue
+
+            matched_rows += 1
+            for idx, gcol in enumerate(grade_cols):
+                if idx < len(question_ids):
+                    qid = question_ids[idx]
+                    mx = qmax.get(qid, 0.0)
+                    total = compute_total_by_display_id(self.grade_con, sid, qid)
+                    pct = (total / mx * 100.0) if mx > 0 else 0.0
+                    row[gcol] = f"{max(0.0, min(100.0, pct)):.2f}"
+                else:
+                    overall = sum(compute_total_by_display_id(self.grade_con, sid, qid) for qid in question_ids)
+                    pct = (overall / overall_max * 100.0) if overall_max > 0 else 0.0
+                    row[gcol] = f"{max(0.0, min(100.0, pct)):.2f}"
+
+        self.upload_unmatched_ids = sorted(set(unmatched))
+        self.upload_result_var.set(
+            f"Filled {matched_rows} rows using student number match. Unmatched IDs: {len(self.upload_unmatched_ids)}"
+        )
+        self._refresh_upload_preview()
+
+    def save_filled_upload_file(self):
+        if not self.upload_rows or not self.upload_headers:
+            messagebox.showinfo("Nothing to save", "Load and fill a file first.")
+            return
+
+        default_ext = ".xlsx"
+        if self.upload_file_path and self.upload_file_path.suffix.lower() == ".csv":
+            default_ext = ".csv"
+
+        out = filedialog.asksaveasfilename(
+            title="Save filled LMS upload file",
+            defaultextension=default_ext,
+            filetypes=[("Excel", "*.xlsx"), ("CSV", "*.csv")],
+        )
+        if not out:
+            return
+
+        out_path = Path(out)
+        try:
+            if out_path.suffix.lower() == ".csv":
+                with open(out_path, "w", encoding="utf-8", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=self.upload_headers)
+                    writer.writeheader()
+                    writer.writerows(self.upload_rows)
+            else:
+                wb = Workbook()
+                ws = wb.active
+                ws.append(self.upload_headers)
+                for row in self.upload_rows:
+                    ws.append([row.get(h, "") for h in self.upload_headers])
+                wb.save(out_path)
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+            return
+
+        messagebox.showinfo("Saved", f"Filled upload file saved:\n{out_path}")
 
     def _build_stats_tab(self):
         ttk.Label(self.tab_stats, text="Class Histogram (raw + curved preview)", style="Pastel.TLabel",
