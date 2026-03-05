@@ -66,6 +66,42 @@ class GPT_test:
 
         return {"scores": scores, "rationale": rationale, "comments": comments}
 
+
+    def _extract_json_payload(self, text: str) -> dict:
+        raw = (text or "").strip()
+        if not raw:
+            raise RuntimeError("Model returned an empty response.")
+
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+
+        if "```" in raw:
+            for block in raw.split("```"):
+                candidate = block.strip()
+                if not candidate:
+                    continue
+                if candidate.lower().startswith("json"):
+                    candidate = candidate[4:].strip()
+                try:
+                    return json.loads(candidate)
+                except Exception:
+                    continue
+
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = raw[start:end + 1]
+            try:
+                return json.loads(candidate)
+            except Exception:
+                pass
+
+        snippet = raw[:280].replace("\n", " ")
+        raise RuntimeError(f"GPT returned invalid JSON. Response starts with: {snippet}")
+
+
     def grade_question(self, *, question_id: str, question_title: str = "", rubric_items: list[dict], code_text: str, extra_prompt: str = "", leniency_level: float = 0.0) -> dict:
         self.last_raw_response = None
         self.last_result = None
@@ -138,10 +174,7 @@ class GPT_test:
                 text = payload["output"][0]["content"][0]["text"]
             except Exception:
                 text = ""
-        try:
-            parsed = json.loads(text)
-        except Exception as e:
-            raise RuntimeError(f"GPT returned invalid JSON: {e}")
+        parsed = self._extract_json_payload(text)
         self.last_result = parsed
         return parsed
 

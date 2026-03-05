@@ -3451,7 +3451,7 @@ class App:
     def _build_code_bundle_text(self):
         if not self.selected_student_id:
             return ""
-        merged_code, _ = self._merged_code_and_file_map(self.selected_student_id)
+        merged_code, _file_map, _line_ranges = self._merged_code_and_file_map(self.selected_student_id)
         max_chars = max(1000, int(self.chat_code_char_limit_var.get() or 7000))
         compact = bool(self.chat_compact_code_var.get())
         if compact and len(merged_code) > max_chars:
@@ -3788,6 +3788,7 @@ class App:
         ttk.Button(top, text="Mark selected ungraded", command=lambda: self.set_selected_student_graded(False)).pack(side=tk.LEFT)
         ttk.Button(top, text="Mark selected reviewed", command=lambda: self.mark_selected_student_reviewed(True)).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Mark selected unreviewed", command=lambda: self.mark_selected_student_reviewed(False)).pack(side=tk.LEFT)
+        ttk.Button(top, text="Clear all reviewed", command=self.clear_all_reviewed_flags).pack(side=tk.LEFT, padx=(10, 0))
 
         self.progress_header_lbl = ttk.Label(top, text="", style="Pastel.TLabel")
         self.progress_header_lbl.pack(side=tk.RIGHT)
@@ -4449,6 +4450,8 @@ class App:
     def _merged_code_and_file_map(self, sid: str):
         file_map = {}
         merged_parts = []
+        line_ranges = []
+        current_line = 1
         for fp in get_student_files(self.sub_con, sid):
             content = get_file_content(self.sub_con, fp)
             if content is None:
@@ -4457,8 +4460,36 @@ class App:
                 except Exception:
                     content = ""
             file_map[fp] = content or ""
-            merged_parts.append(f"// FILE: {Path(fp).name}\n{content or ''}")
-        return "\n\n".join(merged_parts), file_map
+            header = f"// FILE: {Path(fp).name}"
+            code_text = content or ""
+            merged_parts.append(f"{header}\n{code_text}")
+
+            header_lines = 1
+            code_lines = len(code_text.splitlines()) if code_text else 0
+            start_line = current_line + header_lines
+            end_line = start_line + max(0, code_lines - 1)
+            if code_lines > 0:
+                line_ranges.append((fp, start_line, end_line))
+
+            current_line += header_lines + code_lines + 2  # two spacer lines from "\n\n" join
+        return "\n\n".join(merged_parts), file_map, line_ranges
+
+    def _resolve_comment_targets(self, line_no: int, line_ranges: list[tuple[str, int, int]], file_map: dict[str, str]):
+        for fp, start_line, end_line in line_ranges:
+            if start_line <= line_no <= end_line:
+                local_line = (line_no - start_line) + 1
+                return [(fp, local_line)]
+
+        # Fallback when model line number does not match merged-code offsets:
+        # highlight that line in all files so both files get review markers.
+        targets = []
+        for fp, content in file_map.items():
+            lines = (content or "").splitlines()
+            if not lines:
+                continue
+            local_line = max(1, min(line_no, len(lines)))
+            targets.append((fp, local_line))
+        return targets
 
     def _line_to_index(self, content: str, line_no: int):
         lines = (content or "").splitlines()
@@ -4495,7 +4526,7 @@ class App:
 
     def _auto_grade_one_student(self, sid: str, qids: list[str], theme: str):
         self._refresh_gpt_client()
-        merged_code, file_map = self._merged_code_and_file_map(sid)
+        merged_code, file_map, line_ranges = self._merged_code_and_file_map(sid)
         for qid in qids:
             cols = fetch_columns_for_question(self.grade_con, qid)
             rubric_items = [{"col_key": col_key, "group": (group or ""), "criterion": text, "min_points": 0.0, "max_points": float(mx)}
@@ -4530,12 +4561,12 @@ class App:
                 txt = (c.get("comment") or "").strip()
                 if not is_mistake_focused_comment(txt):
                     continue
-                for fp, content in file_map.items():
+                for fp, local_line in self._resolve_comment_targets(line_no, line_ranges, file_map):
+                    content = file_map.get(fp, "")
                     if not content:
                         continue
-                    sidx, eidx = self._line_to_index(content, line_no)
+                    sidx, eidx = self._line_to_index(content, local_line)
                     add_code_comment(self.grade_con, sid, fp, sidx, eidx, f"[{qid}] {txt}", color="#FFE8A3")
-                    break
 
         upsert_grading_progress(self.grade_con, sid, self.selected_question_id, mark_graded=True, reviewed=False, commit=False)
 
@@ -4743,6 +4774,29 @@ class App:
             self.grade_meta_var.set(
                 f"Graded: {'YES' if int(g or 0)==1 else 'NO'} | Reviewed: {'YES' if int(rv or 0)==1 else 'NO'} | First graded: {fg or '-'} | Last updated: {lu or '-'} | Last question: {lq or '-'}"
             )
+
+    def clear_all_reviewed_flags(self):
+        if self.grade_con is None:
+            return
+        rows = self._fetch_progress_rows()
+        if not rows:
+            messagebox.showinfo("Progress", "No students found in progress table.")
+            return
+        if not messagebox.askyesno("Clear all reviewed", "Mark every student as unreviewed?"):
+            return
+
+        with self.grade_con:
+            for sid, *_rest in rows:
+                set_student_reviewed_flag(self.grade_con, sid, False, commit=False)
+
+        self.refresh_progress_tab()
+        self.refresh_summary()
+        if self.selected_student_id:
+            graded, reviewed, first_g, last_u, last_q = load_grading_progress(self.grade_con, self.selected_student_id)
+            self.grade_meta_var.set(
+                f"Graded: {'YES' if int(graded or 0)==1 else 'NO'} | Reviewed: {'YES' if int(reviewed or 0)==1 else 'NO'} | First graded: {first_g or '-'} | Last updated: {last_u or '-'} | Last question: {last_q or '-'}"
+            )
+        messagebox.showinfo("Progress", "All students are now marked unreviewed.")
 
     # ---- students ----
     def refresh_students(self, keep_selected: bool = True):
