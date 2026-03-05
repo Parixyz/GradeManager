@@ -2949,6 +2949,14 @@ class App:
         self.gpt_model_var = tk.StringVar(value="gpt-4.1-mini")
         self.gpt_remote_enabled_var = tk.StringVar(value="0")
         self.auto_prompt_text_widget = None
+        self.prompt_process_text_widget = None
+        self.prompt_result_text_widget = None
+        self.chat_message_widget = None
+        self.chat_preview_widget = None
+        self.chat_include_code_var = tk.BooleanVar(value=True)
+        self.chat_include_scheme_var = tk.BooleanVar(value=True)
+        self.chat_include_prompt_var = tk.BooleanVar(value=True)
+        self.last_auto_grade_trace = {"prompt": "", "result": "", "source": ""}
 
         # Auto-grader (heuristic + optional GPT)
         self.gpt_tester = GPT_test()
@@ -3036,6 +3044,7 @@ class App:
         self.tab_stats = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_progress = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_regex = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
+        self.tab_ai_trace = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_settings = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
 
         self.nb.add(self.tab_grade, text="Grade")
@@ -3043,6 +3052,7 @@ class App:
         self.nb.add(self.tab_stats, text="Stats")
         self.nb.add(self.tab_progress, text="Progress")
         self.nb.add(self.tab_regex, text="Regex / Patterns")
+        self.nb.add(self.tab_ai_trace, text="AI Prompt + Chat")
         self.nb.add(self.tab_settings, text="Settings")
 
         self._build_grade_tab()
@@ -3050,6 +3060,7 @@ class App:
         self._build_stats_tab()
         self._build_progress_tab()
         self._build_regex_tab()
+        self._build_ai_trace_tab()
         self._build_settings_tab()
         self._ensure_default_regex_profile()
         self.load_gpt_settings()
@@ -3140,6 +3151,7 @@ class App:
         ttk.Button(btns, text="Save Theme", command=self.save_theme).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(btns, text="AutoFill", command=self.auto_fill_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Auto-Grade Files", command=self.auto_grade_files_for_student).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        ttk.Button(btns, text="Clear Grade", command=self.clear_selected_student_grade).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Save (all questions)", command=self.save_scores_and_rationale).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Mark Reviewed", command=self.mark_selected_student_reviewed).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(btns, text="Export Grade (selected student)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
@@ -3165,6 +3177,178 @@ class App:
         self.comment_list = tk.Listbox(right, height=7, bg=self.palette["panel"], fg=self.palette["text"],
                                        highlightthickness=0, selectbackground=self.palette["select"])
         self.comment_list.grid(row=14, column=0, sticky="nsew")
+
+    def _build_ai_trace_tab(self):
+        self.tab_ai_trace.columnconfigure(0, weight=1)
+        self.tab_ai_trace.rowconfigure(1, weight=1)
+        self.tab_ai_trace.rowconfigure(3, weight=1)
+
+        top = ttk.Frame(self.tab_ai_trace, style="Pastel.TFrame")
+        top.grid(row=0, column=0, sticky="ew")
+        ttk.Label(top, text="Prompt process + model output", style="Pastel.TLabel", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        ttk.Button(top, text="Refresh from last auto-grade", command=self.refresh_prompt_trace_tab).pack(side=tk.LEFT, padx=8)
+
+        process_box = ttk.Frame(self.tab_ai_trace, style="PastelCard.TFrame", padding=8)
+        process_box.grid(row=1, column=0, sticky="nsew", pady=(8, 6))
+        process_box.columnconfigure(0, weight=1)
+        process_box.rowconfigure(1, weight=1)
+        ttk.Label(process_box, text="Prompt process", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
+        self.prompt_process_text_widget = tk.Text(process_box, height=10, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.prompt_process_text_widget.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
+
+        result_box = ttk.Frame(self.tab_ai_trace, style="PastelCard.TFrame", padding=8)
+        result_box.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
+        result_box.columnconfigure(0, weight=1)
+        result_box.rowconfigure(1, weight=1)
+        ttk.Label(result_box, text="What the grader returned", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
+        self.prompt_result_text_widget = tk.Text(result_box, height=9, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.prompt_result_text_widget.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
+
+        composer = ttk.Frame(self.tab_ai_trace, style="PastelCard.TFrame", padding=8)
+        composer.grid(row=3, column=0, sticky="nsew")
+        composer.columnconfigure(0, weight=1)
+        composer.rowconfigure(5, weight=1)
+        ttk.Label(composer, text="Chat helper (copy both code files + optional scheme/prompt trace + your message)", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        checks = ttk.Frame(composer, style="PastelCard.TFrame")
+        checks.grid(row=1, column=0, sticky="w", pady=(4, 6))
+        ttk.Checkbutton(checks, text="Include student code", variable=self.chat_include_code_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(checks, text="Include rubric scheme", variable=self.chat_include_scheme_var).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Checkbutton(checks, text="Include prompt process + output", variable=self.chat_include_prompt_var).pack(side=tk.LEFT, padx=(10, 0))
+
+        ttk.Label(composer, text="Your chat message", style="PastelCard.TLabel").grid(row=2, column=0, sticky="w")
+        self.chat_message_widget = tk.Text(composer, height=4, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.chat_message_widget.grid(row=3, column=0, sticky="ew", pady=(4, 6))
+
+        chat_btns = ttk.Frame(composer, style="PastelCard.TFrame")
+        chat_btns.grid(row=4, column=0, sticky="w", pady=(0, 6))
+        ttk.Button(chat_btns, text="Preview bundle", command=self.refresh_chat_preview).pack(side=tk.LEFT)
+        ttk.Button(chat_btns, text="Copy bundle", command=self.copy_chat_bundle).pack(side=tk.LEFT, padx=6)
+
+        self.chat_preview_widget = tk.Text(composer, bg="#FFFDF7", fg=self.palette["text"], highlightthickness=1, highlightbackground="#E8E1FF")
+        self.chat_preview_widget.grid(row=5, column=0, sticky="nsew")
+        self.refresh_prompt_trace_tab()
+
+    def _format_last_prompt_process(self):
+        data = self.last_auto_grade_trace.get("prompt")
+        if not data:
+            return "No prompt process captured yet. Run Auto-Grade Files first."
+        return data
+
+    def _format_last_result(self):
+        data = self.last_auto_grade_trace.get("result")
+        if not data:
+            return "No auto-grade output captured yet."
+        return data
+
+    def refresh_prompt_trace_tab(self):
+        if self.prompt_process_text_widget is None or self.prompt_result_text_widget is None:
+            return
+        self.prompt_process_text_widget.delete("1.0", tk.END)
+        self.prompt_process_text_widget.insert("1.0", self._format_last_prompt_process())
+        self.prompt_result_text_widget.delete("1.0", tk.END)
+        self.prompt_result_text_widget.insert("1.0", self._format_last_result())
+
+    def _build_scheme_text(self):
+        if not self.grade_con:
+            return ""
+        rows = fetch_rubric_parts(self.grade_con)
+        if not rows:
+            return ""
+        lines = ["# Rubric scheme"]
+        for qid, col_key, group, col_text, col_max in rows:
+            lines.append(f"- {qid} | {col_key} | {group or '-'} | max {col_max:g} | {col_text}")
+        return "\n".join(lines)
+
+    def _build_code_bundle_text(self):
+        if not self.selected_student_id:
+            return ""
+        merged_code, _ = self._merged_code_and_file_map(self.selected_student_id)
+        header = f"# Student: {self.selected_student_id}\n"
+        return header + merged_code
+
+    def _compose_chat_bundle(self):
+        parts = []
+        if self.chat_include_code_var.get():
+            code = self._build_code_bundle_text()
+            if code:
+                parts.append(code)
+        if self.chat_include_scheme_var.get():
+            scheme = self._build_scheme_text()
+            if scheme:
+                parts.append(scheme)
+        if self.chat_include_prompt_var.get():
+            parts.append("# Prompt process\n" + self._format_last_prompt_process())
+            parts.append("# Model output\n" + self._format_last_result())
+
+        msg = self.chat_message_widget.get("1.0", tk.END).strip() if self.chat_message_widget else ""
+        if msg:
+            parts.append("# My message\n" + msg)
+        return "\n\n".join(p for p in parts if p.strip())
+
+    def refresh_chat_preview(self):
+        if self.chat_preview_widget is None:
+            return
+        payload = self._compose_chat_bundle()
+        self.chat_preview_widget.delete("1.0", tk.END)
+        self.chat_preview_widget.insert("1.0", payload or "Nothing selected yet. Tick at least one source and add a message.")
+
+    def copy_chat_bundle(self):
+        payload = self._compose_chat_bundle()
+        if not payload.strip():
+            messagebox.showinfo("Nothing to copy", "Pick at least one item and/or type your chat message first.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(payload)
+        self.root.update_idletasks()
+        self.refresh_chat_preview()
+        messagebox.showinfo("Copied", "Chat bundle copied to clipboard.")
+
+    def clear_selected_student_grade(self):
+        if not self.require_grading_db():
+            return
+        sid = self.selected_student_id
+        if not sid:
+            messagebox.showinfo("Missing", "Select a student first.")
+            return
+        if not messagebox.askyesno("Clear grade", f"Clear all saved grades, rationale, comments, and progress for {sid}?"):
+            return
+
+        with self.grade_con:
+            self.grade_con.execute("DELETE FROM rubric_scores WHERE student_id=?", (sid,))
+            self.grade_con.execute("DELETE FROM student_notes WHERE student_id=?", (sid,))
+            self.grade_con.execute("DELETE FROM code_comments WHERE student_id=?", (sid,))
+            self.grade_con.execute("DELETE FROM grading_progress WHERE student_id=?", (sid,))
+
+        self.load_student_question_view()
+        self.refresh_summary()
+        self.refresh_progress_tab()
+        self.refresh_prompt_trace_tab()
+        self.refresh_chat_preview()
+        messagebox.showinfo("Cleared", f"Grade data cleared for {sid}.")
+
+    def _capture_auto_grade_trace(self, qid: str):
+        prompt_payload = getattr(self.gpt_tester, "last_prompt_payload", None)
+        request_body = getattr(self.gpt_tester, "last_request_body", None)
+        result_payload = getattr(self.gpt_tester, "last_result", None)
+        source = "remote" if request_body else "heuristic"
+
+        prompt_lines = [
+            f"Question: {qid}",
+            f"Source: {source}",
+            "",
+            "Prompt payload:",
+            json.dumps(prompt_payload, indent=2, ensure_ascii=False) if prompt_payload else "(none)",
+        ]
+        if request_body:
+            prompt_lines.extend(["", "Raw request body:", request_body])
+
+        self.last_auto_grade_trace = {
+            "source": source,
+            "prompt": "\n".join(prompt_lines),
+            "result": json.dumps(result_payload, indent=2, ensure_ascii=False) if result_payload else "(none)",
+        }
+        self.refresh_prompt_trace_tab()
+        self.refresh_chat_preview()
 
     def _build_summary_tab(self):
         top = ttk.Frame(self.tab_summary, style="Pastel.TFrame")
@@ -3830,6 +4014,7 @@ class App:
                                 for col_key, group, text, mx in cols]
                 try:
                     res = self.auto_grader.auto_grade(question_id=qid, question_title=(self.question_map.get(qid, qid) or qid), merged_code=merged_code, rubric_items=rubric_items, theme_text=theme)
+                    self._capture_auto_grade_trace(qid)
                 except Exception as e:
                     messagebox.showerror("Auto grade failed", f"Question {qid}: {e}")
                     return
@@ -4257,6 +4442,7 @@ class App:
 
         try:
             res = self.auto_grader.auto_grade(question_id=self.selected_question_id, question_title=(self.question_map.get(self.selected_question_id, self.selected_question_id) or self.selected_question_id), merged_code=merged_code, rubric_items=rubric_items, theme_text=theme)
+            self._capture_auto_grade_trace(self.selected_question_id)
         except Exception as e:
             messagebox.showerror("Auto grade failed", str(e))
             return

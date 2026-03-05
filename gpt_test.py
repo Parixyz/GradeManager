@@ -14,6 +14,10 @@ class GPT_test:
         self.api_key = (api_key or "").strip()
         self.model = (model or "gpt-4.1-mini").strip()
         self.system_prompt = (system_prompt or "").strip()
+        self.last_prompt_payload = None
+        self.last_request_body = None
+        self.last_raw_response = None
+        self.last_result = None
 
     def _heuristic_grade(self, question_id: str, question_title: str, rubric_items: list[dict], code_text: str) -> dict:
         text = (code_text or "").lower()
@@ -62,8 +66,21 @@ class GPT_test:
         return {"scores": scores, "rationale": rationale, "comments": comments}
 
     def grade_question(self, *, question_id: str, question_title: str = "", rubric_items: list[dict], code_text: str, extra_prompt: str = "") -> dict:
+        self.last_raw_response = None
+        self.last_result = None
         if not self.api_key:
-            return self._heuristic_grade(question_id, question_title, rubric_items, code_text)
+            self.last_prompt_payload = {
+                "question_id": question_id,
+                "question_title": (question_title or question_id),
+                "mode": "heuristic_fallback",
+                "rubric_items": rubric_items or [],
+                "code": code_text,
+                "extra_prompt": extra_prompt or "",
+            }
+            self.last_request_body = None
+            result = self._heuristic_grade(question_id, question_title, rubric_items, code_text)
+            self.last_result = result
+            return result
 
         prompt = {
             "question_id": question_id,
@@ -84,6 +101,8 @@ class GPT_test:
                 {"role": "user", "content": [{"type": "input_text", "text": json.dumps(prompt)}]},
             ],
         }).encode("utf-8")
+        self.last_prompt_payload = prompt
+        self.last_request_body = req_body.decode("utf-8", errors="ignore")
 
         req = urllib.request.Request(
             "https://api.openai.com/v1/responses",
@@ -103,6 +122,7 @@ class GPT_test:
         except Exception as e:
             raise RuntimeError(f"GPT request failed: {e}")
 
+        self.last_raw_response = payload
         text = payload.get("output_text", "").strip()
         if not text:
             try:
@@ -113,4 +133,5 @@ class GPT_test:
             parsed = json.loads(text)
         except Exception as e:
             raise RuntimeError(f"GPT returned invalid JSON: {e}")
+        self.last_result = parsed
         return parsed
