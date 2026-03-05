@@ -4737,7 +4737,12 @@ class App:
         if not qids:
             messagebox.showinfo("Missing", "Load a rubric scheme first.")
             return
-        rows = self.sub_con.execute("SELECT student_id FROM students WHERE include_in_summary=1 ORDER BY student_id").fetchall()
+        rows = self.sub_con.execute("""
+            SELECT student_id
+            FROM students
+            WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
+            ORDER BY student_id
+        """).fetchall()
         student_ids = [r[0] for r in rows if r and r[0]]
         if not student_ids:
             messagebox.showinfo("Missing", "No included students found.")
