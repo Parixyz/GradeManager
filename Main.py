@@ -3336,7 +3336,7 @@ class App:
         right = ttk.Frame(main, style="PastelCard.TFrame", padding=10)
         right.grid(row=0, column=2, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(12, weight=1)
+        right.rowconfigure(9, weight=1)
 
         ttk.Label(right, text="Questions: all loaded rubric questions", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
         self.question_mode_lbl = ttk.Label(right, text="Rubric below shows all questions (question picker removed)", style="PastelCard.TLabel")
@@ -3392,15 +3392,27 @@ class App:
         self.per_question_total_lbl = ttk.Label(right, text="By Question ID: -", style="PastelCard.TLabel", font=("Segoe UI", 9))
         self.per_question_total_lbl.grid(row=7, column=0, sticky="w", pady=(0, 6))
 
-        ttk.Label(right, text="Rubric Table (all questions)", style="PastelCard.TLabel").grid(row=8, column=0, sticky="w")
-        self.rubric_grid = ScrollableRubricGrid(right)
-        self.rubric_grid.set_change_callback(self.schedule_auto_save)
-        self.rubric_grid.grid(row=9, column=0, sticky="nsew")
+        grade_tabs = ttk.Notebook(right)
+        grade_tabs.grid(row=8, column=0, sticky="nsew", pady=(2, 0))
 
-        ttk.Label(right, text="Code comments (this file)", style="PastelCard.TLabel").grid(row=10, column=0, sticky="w", pady=(10,0))
-        self.comment_list = tk.Listbox(right, height=7, bg=self.palette["panel"], fg=self.palette["text"],
+        rubric_tab = ttk.Frame(grade_tabs, style="PastelCard.TFrame", padding=6)
+        comments_tab = ttk.Frame(grade_tabs, style="PastelCard.TFrame", padding=6)
+        rubric_tab.columnconfigure(0, weight=1)
+        rubric_tab.rowconfigure(1, weight=1)
+        comments_tab.columnconfigure(0, weight=1)
+        comments_tab.rowconfigure(1, weight=1)
+        grade_tabs.add(rubric_tab, text="Rubric")
+        grade_tabs.add(comments_tab, text="Comments")
+
+        ttk.Label(rubric_tab, text="Rubric Table (all questions)", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
+        self.rubric_grid = ScrollableRubricGrid(rubric_tab)
+        self.rubric_grid.set_change_callback(self.schedule_auto_save)
+        self.rubric_grid.grid(row=1, column=0, sticky="nsew")
+
+        ttk.Label(comments_tab, text="Code comments (this file)", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
+        self.comment_list = tk.Listbox(comments_tab, bg=self.palette["panel"], fg=self.palette["text"],
                                        highlightthickness=0, selectbackground=self.palette["select"])
-        self.comment_list.grid(row=11, column=0, sticky="nsew")
+        self.comment_list.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
 
     def _current_theme_instructions(self, source: str = "auto") -> str:
         grade_theme = self.theme_text.get("1.0", tk.END).strip() if self.theme_text is not None else ""
