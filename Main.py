@@ -3451,7 +3451,7 @@ class App:
     def _build_code_bundle_text(self):
         if not self.selected_student_id:
             return ""
-        merged_code, _ = self._merged_code_and_file_map(self.selected_student_id)
+        merged_code, _file_map, _line_ranges = self._merged_code_and_file_map(self.selected_student_id)
         max_chars = max(1000, int(self.chat_code_char_limit_var.get() or 7000))
         compact = bool(self.chat_compact_code_var.get())
         if compact and len(merged_code) > max_chars:
