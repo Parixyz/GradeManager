@@ -1012,6 +1012,17 @@ def _parse_tk_index_value(idx: str) -> tuple[int, int]:
     except Exception:
         return 1, 0
 
+
+def _line_highlight_range(start_index: str, end_index: str) -> tuple[str, str]:
+    """
+    Convert any Tk text index range into whole-line Tk index bounds.
+    This keeps review highlights stable even when character columns are noisy.
+    """
+    start, end = _normalize_index_range(start_index, end_index)
+    s_line = max(1, int(start[0]))
+    e_line = max(s_line, int(end[0]))
+    return f"{s_line}.0", f"{e_line}.end"
+
 def _normalize_index_range(start_index: str, end_index: str) -> tuple[tuple[int, int], tuple[int, int]]:
     start = _parse_tk_index_value(start_index)
     end = _parse_tk_index_value(end_index)
@@ -4970,10 +4981,11 @@ class App:
                 except Exception:
                     pass
             try:
-                self.preview.tag_add(tag, sidx, eidx)
+                line_start, line_end = _line_highlight_range(sidx, eidx)
+                self.preview.tag_add(tag, line_start, line_end)
             except Exception:
                 pass
-            self.comment_list.insert(tk.END, f"#{cid} {sidx}–{eidx}: {text}")
+            self.comment_list.insert(tk.END, f"#{cid} {line_start}–{line_end}: {text}")
 
     def add_comment_to_selection(self):
         if not self.require_grading_db():
@@ -5105,7 +5117,7 @@ class App:
         rubric_items = [{"col_key": col_key, "group": (group or ""), "criterion": text, "min_points": 0.0, "max_points": float(mx)}
                         for col_key, group, text, mx in cols]
         merged_code = merge_student_code(self.sub_con, self.selected_student_id)
-        theme = self.theme_text.get("1.0", tk.END).strip()
+        theme = self._current_theme_instructions()
 
         try:
             self._refresh_gpt_client()
