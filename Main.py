@@ -4058,7 +4058,7 @@ class App:
         self.upload_preview_tree = ttk.Treeview(self.tab_upload, show="headings", height=14)
         self.upload_preview_tree.pack(fill=tk.BOTH, expand=True)
 
-        unmatched_box = ttk.LabelFrame(self.tab_upload, text="Student numbers not found in DB", padding=8)
+        unmatched_box = ttk.LabelFrame(self.tab_upload, text="DB student numbers not found in loaded Excel/CSV", padding=8)
         unmatched_box.pack(fill=tk.BOTH, expand=False, pady=(8, 0))
         self.upload_unmatched_list = tk.Listbox(unmatched_box, height=6, bg=self.palette["panel"], fg=self.palette["text"], highlightthickness=0)
         self.upload_unmatched_list.pack(fill=tk.BOTH, expand=True)
@@ -4169,13 +4169,47 @@ class App:
             if sid
         }
 
-        unmatched: list[str] = []
+        excel_ids = {
+            normalize_student_id(str(row.get(id_col, "")))
+            for row in self.upload_rows
+            if normalize_student_id(str(row.get(id_col, "")))
+        }
+        missing_in_excel = sorted(sid for sid in db_students.keys() if sid not in excel_ids)
+
+        students_with_existing_values = set()
+        overwrite_conflicts: list[tuple[str, str]] = []
+        for row in self.upload_rows:
+            sid = normalize_student_id(str(row.get(id_col, "")))
+            if not sid or sid not in db_students:
+                continue
+            for gcol in grade_cols:
+                existing = str(row.get(gcol, "")).strip()
+                if existing:
+                    students_with_existing_values.add(sid)
+                    overwrite_conflicts.append((sid, gcol))
+
+        if overwrite_conflicts:
+            preview = "\n".join(f"- {sid} ({gcol})" for sid, gcol in overwrite_conflicts[:10])
+            more = "" if len(overwrite_conflicts) <= 10 else f"\n... and {len(overwrite_conflicts) - 10} more"
+            self.upload_unmatched_ids = missing_in_excel
+            self.upload_result_var.set(
+                f"Stopped: found {len(overwrite_conflicts)} pre-filled grade cell(s). "
+                f"Students already having a value: {len(students_with_existing_values)} | "
+                f"DB students missing in file: {len(self.upload_unmatched_ids)}"
+            )
+            self._refresh_upload_preview()
+            messagebox.showerror(
+                "Existing values detected",
+                "Cannot fill because at least one '* Points Grade' cell already has a value. "
+                "Clear those cells first.\n\n"
+                f"Examples:\n{preview}{more}"
+            )
+            return
+
         matched_rows = 0
         for row in self.upload_rows:
             sid = normalize_student_id(str(row.get(id_col, "")))
             if not sid or sid not in db_students:
-                if sid:
-                    unmatched.append(sid)
                 continue
 
             matched_rows += 1
@@ -4191,9 +4225,19 @@ class App:
                     pct = (overall / overall_max * 100.0) if overall_max > 0 else 0.0
                     row[gcol] = f"{max(0.0, min(100.0, pct)):.2f}"
 
-        self.upload_unmatched_ids = sorted(set(unmatched))
+        students_with_values_after_fill = 0
+        for row in self.upload_rows:
+            sid = normalize_student_id(str(row.get(id_col, "")))
+            if not sid or sid not in db_students:
+                continue
+            if any(str(row.get(gcol, "")).strip() for gcol in grade_cols):
+                students_with_values_after_fill += 1
+
+        self.upload_unmatched_ids = missing_in_excel
         self.upload_result_var.set(
-            f"Filled {matched_rows} rows using student number match. Unmatched IDs: {len(self.upload_unmatched_ids)}"
+            f"Filled {matched_rows} rows. DB students matched in file: {len(excel_ids & set(db_students.keys()))}/{len(db_students)} | "
+            f"DB students missing in file: {len(self.upload_unmatched_ids)} | "
+            f"Students with actual grade values in file: {students_with_values_after_fill}"
         )
         self._refresh_upload_preview()
 
