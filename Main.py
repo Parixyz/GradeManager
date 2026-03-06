@@ -1829,9 +1829,14 @@ class ScrollableRubricGrid(ttk.Frame):
         self.score_vars = {}
         self.note_vars = {}
         self._change_callback = None
+        self._enter_callback = None
+        self.score_entries = {}
 
     def set_change_callback(self, callback):
         self._change_callback = callback
+
+    def set_enter_callback(self, callback):
+        self._enter_callback = callback
 
     def build(self, columns):
         for w in self.inner.winfo_children():
@@ -1840,6 +1845,7 @@ class ScrollableRubricGrid(ttk.Frame):
         self.columns = columns
         self.score_vars.clear()
         self.note_vars.clear()
+        self.score_entries.clear()
 
         ttk.Label(self.inner, text="Criterion", style="Pastel.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w", padx=6, pady=4)
         ttk.Label(self.inner, text="Score", style="Pastel.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=1, sticky="w", padx=6, pady=4)
@@ -1866,11 +1872,17 @@ class ScrollableRubricGrid(ttk.Frame):
             if self._change_callback is not None:
                 sv.trace_add("write", lambda *_args: self._change_callback())
                 nv.trace_add("write", lambda *_args: self._change_callback())
-            ttk.Entry(self.inner, textvariable=sv, width=8).grid(row=r, column=1, sticky="w", padx=6, pady=4)
-            ttk.Entry(self.inner, textvariable=nv, width=60).grid(row=r, column=2, sticky="ew", padx=6, pady=4)
+            score_entry = ttk.Entry(self.inner, textvariable=sv, width=8)
+            score_entry.grid(row=r, column=1, sticky="w", padx=6, pady=4)
+            note_entry = ttk.Entry(self.inner, textvariable=nv, width=60)
+            note_entry.grid(row=r, column=2, sticky="ew", padx=6, pady=4)
+            if self._enter_callback is not None:
+                score_entry.bind("<Return>", self._enter_callback)
+                note_entry.bind("<Return>", self._enter_callback)
 
             self.score_vars[col_key] = sv
             self.note_vars[col_key] = nv
+            self.score_entries[col_key] = score_entry
             r += 1
 
         self.inner.columnconfigure(2, weight=1)
@@ -1886,6 +1898,15 @@ class ScrollableRubricGrid(ttk.Frame):
         scores = {k: v.get().strip() for k, v in self.score_vars.items()}
         notes = {k: v.get().strip() for k, v in self.note_vars.items()}
         return scores, notes
+
+    def focus_first_score_entry(self):
+        if not self.columns:
+            return
+        first_key = self.columns[0][0]
+        w = self.score_entries.get(first_key)
+        if w is not None:
+            w.focus_set()
+            w.selection_range(0, tk.END)
 
 
 # =============================================================================
@@ -3146,6 +3167,7 @@ class App:
         self.selected_display_question_id: str | None = None
         self.question_pick_var = tk.StringVar(value="")
         self.question_nav_var = tk.StringVar(value="")
+        self.twin_file_title_var = tk.StringVar(value="Twin files: -")
         self._rubric_ui_map: dict[str, tuple[str, str]] = {}
         self._rubric_max_map: dict[str, float] = {}
         self._auto_save_job = None
@@ -3437,14 +3459,55 @@ class App:
         rubric_tab = ttk.Frame(grade_tabs, style="PastelCard.TFrame", padding=6)
         settings_tab = ttk.Frame(grade_tabs, style="PastelCard.TFrame", padding=8)
         comments_tab = ttk.Frame(grade_tabs, style="PastelCard.TFrame", padding=6)
+        twin_tab = ttk.Frame(grade_tabs, style="PastelCard.TFrame", padding=6)
         rubric_tab.columnconfigure(0, weight=1)
         rubric_tab.rowconfigure(1, weight=1)
         settings_tab.columnconfigure(0, weight=1)
         comments_tab.columnconfigure(0, weight=1)
         comments_tab.rowconfigure(1, weight=1)
+        twin_tab.columnconfigure(0, weight=1)
+        twin_tab.columnconfigure(1, weight=1)
+        twin_tab.rowconfigure(2, weight=1)
         grade_tabs.add(rubric_tab, text="Rubric")
         grade_tabs.add(settings_tab, text="Theme + Rationale")
         grade_tabs.add(comments_tab, text="Comments")
+        grade_tabs.add(twin_tab, text="Twin Files")
+
+        twin_top = ttk.Frame(twin_tab, style="PastelCard.TFrame")
+        twin_top.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        ttk.Label(twin_top, textvariable=self.twin_file_title_var, style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        ttk.Button(twin_top, text="Save + Next Student", command=self.save_and_next_student_same_question).pack(side=tk.RIGHT)
+
+        ttk.Label(twin_tab, text="First file", style="PastelCard.TLabel").grid(row=1, column=0, sticky="w")
+        ttk.Label(twin_tab, text="Second file", style="PastelCard.TLabel").grid(row=1, column=1, sticky="w")
+
+        twin_left = ttk.Frame(twin_tab, style="PastelCard.TFrame")
+        twin_left.grid(row=2, column=0, sticky="nsew", padx=(0, 6))
+        twin_left.rowconfigure(0, weight=1)
+        twin_left.columnconfigure(0, weight=1)
+        self.twin_preview_a = tk.Text(twin_left, wrap="none", height=16,
+                                      bg="#FFFDF7", fg=self.palette["text"],
+                                      insertbackground=self.palette["text"],
+                                      highlightthickness=1, highlightbackground="#E8E1FF")
+        self.twin_preview_a.grid(row=0, column=0, sticky="nsew")
+        self.twin_preview_a.configure(state="disabled")
+
+        twin_right = ttk.Frame(twin_tab, style="PastelCard.TFrame")
+        twin_right.grid(row=2, column=1, sticky="nsew", padx=(6, 0))
+        twin_right.rowconfigure(0, weight=1)
+        twin_right.columnconfigure(0, weight=1)
+        self.twin_preview_b = tk.Text(twin_right, wrap="none", height=16,
+                                      bg="#FFFDF7", fg=self.palette["text"],
+                                      insertbackground=self.palette["text"],
+                                      highlightthickness=1, highlightbackground="#E8E1FF")
+        self.twin_preview_b.grid(row=0, column=0, sticky="nsew")
+        self.twin_preview_b.configure(state="disabled")
+
+        ttk.Label(
+            twin_tab,
+            text="Workflow: pick sub-question, type score values, then press Enter to save and move to next student (same sub-question).",
+            style="PastelCard.TLabel"
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         settings_tabs = ttk.Notebook(settings_tab)
         settings_tabs.grid(row=0, column=0, sticky="ew")
@@ -3492,6 +3555,7 @@ class App:
         ttk.Label(rubric_tab, text="Rubric Table (all questions)", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
         self.rubric_grid = ScrollableRubricGrid(rubric_tab)
         self.rubric_grid.set_change_callback(self.schedule_auto_save)
+        self.rubric_grid.set_enter_callback(self.on_score_enter_next_student)
         self.rubric_grid.grid(row=1, column=0, sticky="nsew")
 
         ttk.Label(comments_tab, text="Code comments (this file)", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
@@ -5494,6 +5558,56 @@ class App:
             current = self.student_ids.index(self.selected_student_id)
         self._select_student_index(min(len(self.student_ids) - 1, current + 1))
 
+    def _set_text_readonly(self, widget: tk.Text, content: str):
+        widget.configure(state="normal")
+        widget.delete("1.0", tk.END)
+        widget.insert("1.0", content)
+        widget.configure(state="disabled")
+
+    def refresh_twin_file_previews(self):
+        if not hasattr(self, "twin_preview_a") or not hasattr(self, "twin_preview_b"):
+            return
+        if not self.selected_student_id:
+            self.twin_file_title_var.set("Twin files: -")
+            self._set_text_readonly(self.twin_preview_a, "")
+            self._set_text_readonly(self.twin_preview_b, "")
+            return
+
+        files = get_student_files(self.sub_con, self.selected_student_id)
+        first_two = list(files[:2])
+        names = [Path(fp).name for fp in first_two]
+        while len(first_two) < 2:
+            first_two.append("")
+        while len(names) < 2:
+            names.append("-")
+
+        content_a = get_file_content(self.sub_con, first_two[0]) if first_two[0] else ""
+        content_b = get_file_content(self.sub_con, first_two[1]) if first_two[1] else ""
+        self._set_text_readonly(self.twin_preview_a, content_a or "")
+        self._set_text_readonly(self.twin_preview_b, content_b or "")
+        self.twin_file_title_var.set(f"Twin files: {names[0]} | {names[1]}")
+
+    def on_score_enter_next_student(self, _evt=None):
+        self.save_and_next_student_same_question()
+        return "break"
+
+    def save_and_next_student_same_question(self):
+        if not self.selected_student_id:
+            return
+        ok = self.save_scores_and_rationale(show_message=False)
+        if ok is False:
+            return
+        current = self.selected_student_id
+        if current not in self.student_ids:
+            return
+        idx = self.student_ids.index(current)
+        if idx >= len(self.student_ids) - 1:
+            return
+        self._select_student_index(idx + 1)
+        try:
+            self.rubric_grid.focus_first_score_entry()
+        except Exception:
+            pass
     def on_student_select(self, _evt=None):
         sel = self.student_list.curselection()
         if not sel:
@@ -5530,6 +5644,7 @@ class App:
         if self.grade_con is not None:
             self.refresh_question_picker_for_student()
 
+        self.refresh_twin_file_previews()
         self.load_student_question_view()
         self.refresh_summary()
         self.refresh_chat_preview()
@@ -5721,13 +5836,13 @@ class App:
     # ---- save ----
     def save_scores_and_rationale(self, show_message: bool = True):
         if not self.require_grading_db():
-            return
+            return False
         if not self.selected_student_id:
             messagebox.showinfo("Missing", "Select a student first.")
-            return
+            return False
         if not self._rubric_ui_map:
             messagebox.showinfo("Missing", "Load a rubric scheme first.")
-            return
+            return False
 
         score_raw, note_raw = self.rubric_grid.get_values()
 
@@ -5741,7 +5856,7 @@ class App:
                         points = float(raw)
                     except ValueError:
                         messagebox.showerror("Invalid score", f"Score must be numeric or blank.\nBad value for:\n{ui_key}")
-                        return
+                        return False
                     points = clamp_points(points, self._rubric_max_map.get(ui_key, points))
 
                 qid, col_key = self._rubric_ui_map[ui_key]
@@ -5768,6 +5883,8 @@ class App:
             )
         if show_message:
             messagebox.showinfo("Saved", "Saved scores + single rationale.")
+        return True
+
 
 
     # ---- Optional auto grade (separate component) ----
