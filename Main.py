@@ -3167,7 +3167,6 @@ class App:
         self.selected_display_question_id: str | None = None
         self.question_pick_var = tk.StringVar(value="")
         self.question_nav_var = tk.StringVar(value="")
-        self.twin_file_title_var = tk.StringVar(value="Twin files: -")
         self._rubric_ui_map: dict[str, tuple[str, str]] = {}
         self._rubric_max_map: dict[str, float] = {}
         self._auto_save_job = None
@@ -5557,57 +5556,6 @@ class App:
         if self.selected_student_id in self.student_ids:
             current = self.student_ids.index(self.selected_student_id)
         self._select_student_index(min(len(self.student_ids) - 1, current + 1))
-
-    def _set_text_readonly(self, widget: tk.Text, content: str):
-        widget.configure(state="normal")
-        widget.delete("1.0", tk.END)
-        widget.insert("1.0", content)
-        widget.configure(state="disabled")
-
-    def refresh_twin_file_previews(self):
-        if not hasattr(self, "twin_preview_a") or not hasattr(self, "twin_preview_b"):
-            return
-        if not self.selected_student_id:
-            self.twin_file_title_var.set("Twin files: -")
-            self._set_text_readonly(self.twin_preview_a, "")
-            self._set_text_readonly(self.twin_preview_b, "")
-            return
-
-        files = get_student_files(self.sub_con, self.selected_student_id)
-        first_two = list(files[:2])
-        names = [Path(fp).name for fp in first_two]
-        while len(first_two) < 2:
-            first_two.append("")
-        while len(names) < 2:
-            names.append("-")
-
-        content_a = get_file_content(self.sub_con, first_two[0]) if first_two[0] else ""
-        content_b = get_file_content(self.sub_con, first_two[1]) if first_two[1] else ""
-        self._set_text_readonly(self.twin_preview_a, content_a or "")
-        self._set_text_readonly(self.twin_preview_b, content_b or "")
-        self.twin_file_title_var.set(f"Twin files: {names[0]} | {names[1]}")
-
-    def on_score_enter_next_student(self, _evt=None):
-        self.save_and_next_student_same_question()
-        return "break"
-
-    def save_and_next_student_same_question(self):
-        if not self.selected_student_id:
-            return
-        ok = self.save_scores_and_rationale(show_message=False)
-        if ok is False:
-            return
-        current = self.selected_student_id
-        if current not in self.student_ids:
-            return
-        idx = self.student_ids.index(current)
-        if idx >= len(self.student_ids) - 1:
-            return
-        self._select_student_index(idx + 1)
-        try:
-            self.rubric_grid.focus_first_score_entry()
-        except Exception:
-            pass
 
     def on_student_select(self, _evt=None):
         sel = self.student_list.curselection()
