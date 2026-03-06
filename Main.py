@@ -3228,6 +3228,8 @@ class App:
         self.upload_headers: list[str] = []
         self.upload_file_path: Path | None = None
         self.upload_unmatched_ids: list[str] = []
+        self.grade_list_tree = None
+        self.grade_list_copy_var = tk.StringVar(value="Click any cell to copy its value.")
 
         # Auto-grader (heuristic + optional GPT)
         self.gpt_tester = GPT_test()
@@ -3336,6 +3338,7 @@ class App:
         self.tab_pdf_menu = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_db = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
         self.tab_upload = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
+        self.tab_grade_list = ttk.Frame(self.nb, style="Pastel.TFrame", padding=10)
 
         self.nb.add(self.tab_grade, text="Grade")
         self.nb.add(self.tab_summary, text="Summary")
@@ -3347,6 +3350,7 @@ class App:
         self.nb.add(self.tab_pdf_menu, text="PDF Menu")
         self.nb.add(self.tab_db, text="DB Browser")
         self.nb.add(self.tab_upload, text="LMS Upload")
+        self.nb.add(self.tab_grade_list, text="Grades List")
 
         self._build_grade_tab()
         self._build_summary_tab()
@@ -3358,6 +3362,7 @@ class App:
         self._build_pdf_menu_tab()
         self._build_db_tab()
         self._build_upload_tab()
+        self._build_grade_list_tab()
         self._ensure_default_regex_profile()
         self.load_gpt_settings()
         self.load_ui_preferences()
@@ -3786,6 +3791,26 @@ class App:
         self.refresh_chat_preview()
         messagebox.showinfo("Copied", "Chat bundle copied to clipboard.")
 
+    def on_grade_list_click_copy(self, event):
+        if self.grade_list_tree is None:
+            return
+        row_id = self.grade_list_tree.identify_row(event.y)
+        col_id = self.grade_list_tree.identify_column(event.x)
+        if not row_id or not col_id:
+            return
+        try:
+            col_index = int(col_id.replace("#", "")) - 1
+        except Exception:
+            return
+        vals = self.grade_list_tree.item(row_id, "values")
+        if not vals or col_index < 0 or col_index >= len(vals):
+            return
+        value = str(vals[col_index])
+        self.root.clipboard_clear()
+        self.root.clipboard_append(value)
+        self.root.update_idletasks()
+        self.grade_list_copy_var.set(f"Copied: {value}")
+
     def _append_chat_transcript(self, role: str, text: str):
         if self.chat_transcript_widget is None:
             return
@@ -4038,6 +4063,32 @@ class App:
             style="Pastel.TLabel"
         )
         note.pack(anchor="w", pady=(8,0))
+
+    def _build_grade_list_tab(self):
+        top = ttk.Frame(self.tab_grade_list, style="Pastel.TFrame")
+        top.pack(fill=tk.X)
+
+        ttk.Button(top, text="Refresh Grades List", command=self.refresh_grade_list_tab).pack(side=tk.LEFT)
+        ttk.Label(top, textvariable=self.grade_list_copy_var, style="Pastel.TLabel").pack(side=tk.LEFT, padx=10)
+
+        self.grade_list_tree = ttk.Treeview(
+            self.tab_grade_list,
+            columns=("student_id", "student_name"),
+            show="headings",
+            height=25,
+        )
+        self.grade_list_tree.heading("student_id", text="student_id")
+        self.grade_list_tree.heading("student_name", text="student_name")
+        self.grade_list_tree.column("student_id", width=150, anchor="w")
+        self.grade_list_tree.column("student_name", width=240, anchor="w")
+        self.grade_list_tree.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        self.grade_list_tree.bind("<ButtonRelease-1>", self.on_grade_list_click_copy)
+
+        ttk.Label(
+            self.tab_grade_list,
+            text="Columns show per-question percentages. Click a cell to copy name, id, or grade.",
+            style="Pastel.TLabel",
+        ).pack(anchor="w", pady=(8, 0))
 
 
     def _build_pdf_menu_tab(self):
@@ -6054,6 +6105,50 @@ class App:
         self.hist_ax.legend()
         self.hist_canvas.draw()
 
+    def refresh_grade_list_tab(self):
+        if self.grade_list_tree is None:
+            return
+
+        for item in self.grade_list_tree.get_children():
+            self.grade_list_tree.delete(item)
+
+        if self.grade_con is None:
+            self.grade_list_tree.configure(columns=("student_id", "student_name"))
+            self.grade_list_copy_var.set("No grading DB loaded.")
+            return
+
+        question_ids = fetch_display_question_ids(self.grade_con)
+        cols = ["student_id", "student_name"] + [f"{qid}_pct" for qid in question_ids]
+        self.grade_list_tree.configure(columns=cols)
+
+        for c in cols:
+            self.grade_list_tree.heading(c, text=c)
+            self.grade_list_tree.column(c, width=130 if c != "student_name" else 220, anchor="w")
+
+        students = self.sub_con.execute("""
+          SELECT student_id, student_name
+          FROM students
+          WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
+          ORDER BY student_id
+        """).fetchall()
+
+        qmax_map = {qid: compute_question_max(self.grade_con, qid) for qid in question_ids}
+        for sid, sname in students:
+            if not has_required_student_fields(sid, sname):
+                continue
+            row = [sid, sname]
+            for qid in question_ids:
+                max_pts = float(qmax_map.get(qid, 0.0) or 0.0)
+                pts = float(compute_total_by_display_id(self.grade_con, sid, qid) or 0.0)
+                if max_pts > 0:
+                    pct = (pts / max_pts) * 100.0
+                    row.append(f"{pct:.2f}%")
+                else:
+                    row.append("")
+            self.grade_list_tree.insert("", "end", values=row)
+
+        self.grade_list_copy_var.set("Click any cell to copy its value.")
+
     def refresh_summary(self):
         if self.grade_con is None:
             for item in self.sum_tree.get_children():
@@ -6063,6 +6158,7 @@ class App:
             self._update_student_progress_labels(0, 0, 0, 0)
             self.refresh_histogram()
             self.refresh_progress_tab()
+            self.refresh_grade_list_tab()
             return
 
         for item in self.sum_tree.get_children():
@@ -6109,6 +6205,7 @@ class App:
         self._update_student_progress_labels(total, assessed, reviewed_count, left)
         self.refresh_histogram()
         self.refresh_progress_tab()
+        self.refresh_grade_list_tab()
 
     # ---- PDF Exports ----
     def export_student_pdf(self):
