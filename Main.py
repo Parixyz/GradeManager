@@ -3403,16 +3403,36 @@ class App:
         right = ttk.Frame(main, style="PastelCard.TFrame", padding=10)
         right.grid(row=0, column=2, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(9, weight=1)
+        right.rowconfigure(5, weight=1)
 
         ttk.Label(right, text="Questions: all loaded rubric questions", style="PastelCard.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
         self.question_mode_lbl = ttk.Label(right, text="Rubric below shows all questions (question picker removed)", style="PastelCard.TLabel")
         self.question_mode_lbl.grid(row=1, column=0, sticky="w", pady=(4,8))
 
-        ttk.Separator(right, orient="horizontal").grid(row=4, column=0, sticky="ew", pady=(8,10))
+        ttk.Separator(right, orient="horizontal").grid(row=2, column=0, sticky="ew", pady=(8,10))
 
-        settings_tabs = ttk.Notebook(right)
-        settings_tabs.grid(row=5, column=0, sticky="ew")
+        self.total_lbl = ttk.Label(right, text="Overall Total: -", style="PastelCard.TLabel", font=("Segoe UI", 11, "bold"))
+        self.total_lbl.grid(row=3, column=0, sticky="w", pady=(0, 2))
+        self.per_question_total_lbl = ttk.Label(right, text="By Question ID: -", style="PastelCard.TLabel", font=("Segoe UI", 9))
+        self.per_question_total_lbl.grid(row=4, column=0, sticky="w", pady=(0, 6))
+
+        grade_tabs = ttk.Notebook(right)
+        grade_tabs.grid(row=5, column=0, sticky="nsew", pady=(2, 0))
+
+        rubric_tab = ttk.Frame(grade_tabs, style="PastelCard.TFrame", padding=6)
+        settings_tab = ttk.Frame(grade_tabs, style="PastelCard.TFrame", padding=8)
+        comments_tab = ttk.Frame(grade_tabs, style="PastelCard.TFrame", padding=6)
+        rubric_tab.columnconfigure(0, weight=1)
+        rubric_tab.rowconfigure(1, weight=1)
+        settings_tab.columnconfigure(0, weight=1)
+        comments_tab.columnconfigure(0, weight=1)
+        comments_tab.rowconfigure(1, weight=1)
+        grade_tabs.add(rubric_tab, text="Rubric")
+        grade_tabs.add(settings_tab, text="Theme + Rationale")
+        grade_tabs.add(comments_tab, text="Comments")
+
+        settings_tabs = ttk.Notebook(settings_tab)
+        settings_tabs.grid(row=0, column=0, sticky="ew")
 
         theme_tab = ttk.Frame(settings_tabs, style="PastelCard.TFrame", padding=8)
         rationale_tab = ttk.Frame(settings_tabs, style="PastelCard.TFrame", padding=8)
@@ -3453,23 +3473,6 @@ class App:
         self.rationale_text.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         self.rationale_text.bind("<KeyRelease>", lambda _e: self.schedule_auto_save())
         self.rationale_text.bind("<FocusOut>", lambda _e: self.schedule_auto_save())
-
-        self.total_lbl = ttk.Label(right, text="Overall Total: -", style="PastelCard.TLabel", font=("Segoe UI", 11, "bold"))
-        self.total_lbl.grid(row=6, column=0, sticky="w", pady=(6, 2))
-        self.per_question_total_lbl = ttk.Label(right, text="By Question ID: -", style="PastelCard.TLabel", font=("Segoe UI", 9))
-        self.per_question_total_lbl.grid(row=7, column=0, sticky="w", pady=(0, 6))
-
-        grade_tabs = ttk.Notebook(right)
-        grade_tabs.grid(row=8, column=0, sticky="nsew", pady=(2, 0))
-
-        rubric_tab = ttk.Frame(grade_tabs, style="PastelCard.TFrame", padding=6)
-        comments_tab = ttk.Frame(grade_tabs, style="PastelCard.TFrame", padding=6)
-        rubric_tab.columnconfigure(0, weight=1)
-        rubric_tab.rowconfigure(1, weight=1)
-        comments_tab.columnconfigure(0, weight=1)
-        comments_tab.rowconfigure(1, weight=1)
-        grade_tabs.add(rubric_tab, text="Rubric")
-        grade_tabs.add(comments_tab, text="Comments")
 
         ttk.Label(rubric_tab, text="Rubric Table (all questions)", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
         self.rubric_grid = ScrollableRubricGrid(rubric_tab)
