@@ -3557,6 +3557,13 @@ class App:
         self.rationale_text.bind("<KeyRelease>", lambda _e: self.schedule_auto_save())
         self.rationale_text.bind("<FocusOut>", lambda _e: self.schedule_auto_save())
 
+        rationale_btns = ttk.Frame(rationale_tab, style="PastelCard.TFrame")
+        rationale_btns.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(rationale_btns, text="Regenerate Rationale (question)", command=self.regenerate_rationale_for_question).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(rationale_btns, text="Regenerate Rationale (all questions)", command=self.regenerate_rationale_for_all_questions).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(rationale_btns, text="Regenerate Notes (question)", command=self.regenerate_notes_for_question).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(rationale_btns, text="Regenerate Notes (all questions)", command=self.regenerate_notes_for_all_questions).pack(side=tk.LEFT)
+
         ttk.Label(rubric_tab, text="Rubric Table (all questions)", style="PastelCard.TLabel").grid(row=0, column=0, sticky="w")
         self.rubric_grid = ScrollableRubricGrid(rubric_tab)
         self.rubric_grid.set_change_callback(self.schedule_auto_save)
@@ -5938,6 +5945,91 @@ class App:
 
 
 
+    def _generate_feedback_without_regrading(self, qid: str, include_rationale: bool, include_notes: bool):
+        if not qid or not self.selected_student_id:
+            return
+        cols = fetch_columns_for_question(self.grade_con, qid)
+        if not cols:
+            return
+        rubric_items = [{"col_key": col_key, "group": (group or ""), "criterion": text, "min_points": 0.0, "max_points": float(mx)}
+                        for col_key, group, text, mx in cols]
+        merged_code = merge_student_code(self.sub_con, self.selected_student_id)
+        theme = self._current_theme_instructions()
+
+        self._refresh_gpt_client()
+        res = self.auto_grader.auto_grade(
+            question_id=qid,
+            question_title=(self.question_map.get(qid, qid) or qid),
+            merged_code=merged_code,
+            rubric_items=rubric_items,
+            theme_text=theme,
+            leniency_level=float(self.leniency_level_var.get()),
+        )
+        self._capture_auto_grade_trace(qid)
+
+        note_map = {x.get("col_key"): (x.get("note", "") or "") for x in res.get("scores", []) if x.get("col_key")}
+        with self.grade_con:
+            if include_notes:
+                score_map_existing, _ = load_student_scores(self.grade_con, self.selected_student_id, qid)
+                for col_key, _group, _text, mx in cols:
+                    pts = score_map_existing.get(col_key)
+                    if pts is not None:
+                        pts = clamp_points(float(pts), float(mx))
+                    upsert_score(self.grade_con, self.selected_student_id, qid, col_key, pts, note_map.get(col_key, ""), commit=False)
+
+            if include_rationale:
+                rationale = (res.get("rationale") or "").strip()
+                total = compute_total(self.grade_con, self.selected_student_id, qid)
+                upsert_student_note(self.grade_con, self.selected_student_id, qid, rationale, overall_grade=total, commit=False)
+
+    def _refresh_feedback_for_scope(self, include_rationale: bool, include_notes: bool, all_questions: bool):
+        if not self.require_grading_db():
+            return
+        if not self.selected_student_id:
+            messagebox.showinfo("Missing", "Select a student first.")
+            return
+
+        if all_questions:
+            display_ids = self._display_question_ids()
+            qids = [members[0] for members in (self._question_member_ids(dq) for dq in display_ids) if members]
+        else:
+            qids = [self.selected_question_id] if self.selected_question_id else []
+
+        if not qids:
+            messagebox.showinfo("Missing", "Select a question first.")
+            return
+
+        try:
+            for qid in qids:
+                self._generate_feedback_without_regrading(qid, include_rationale=include_rationale, include_notes=include_notes)
+        except Exception as e:
+            messagebox.showerror("Regenerate failed", str(e))
+            return
+
+        self.load_student_question_view()
+        self.refresh_summary()
+        self.refresh_progress_tab()
+        what = []
+        if include_rationale:
+            what.append("rationale")
+        if include_notes:
+            what.append("notes")
+        scope = "all questions" if all_questions else "current question"
+        messagebox.showinfo("Done", f"Regenerated {' + '.join(what)} for {scope} without changing scores.")
+
+    def regenerate_rationale_for_question(self):
+        self._refresh_feedback_for_scope(include_rationale=True, include_notes=False, all_questions=False)
+
+    def regenerate_rationale_for_all_questions(self):
+        self._refresh_feedback_for_scope(include_rationale=True, include_notes=False, all_questions=True)
+
+    def regenerate_notes_for_question(self):
+        self._refresh_feedback_for_scope(include_rationale=False, include_notes=True, all_questions=False)
+
+    def regenerate_notes_for_all_questions(self):
+        self._refresh_feedback_for_scope(include_rationale=False, include_notes=True, all_questions=True)
+
+
     # ---- Optional auto grade (separate component) ----
     def auto_grade_optional(self):
         if not self.require_grading_db():
@@ -6118,7 +6210,7 @@ class App:
             return
 
         question_ids = fetch_display_question_ids(self.grade_con)
-        cols = ["student_id", "student_name"] + [f"{qid}_pct" for qid in question_ids]
+        cols = ["student_id", "student_name", "rationale"] + [f"{qid}_pct" for qid in question_ids]
         self.grade_list_tree.configure(columns=cols)
 
         for c in cols:
@@ -6136,7 +6228,7 @@ class App:
         for sid, sname in students:
             if not has_required_student_fields(sid, sname):
                 continue
-            row = [sid, sname]
+            row = [sid, sname, self._get_single_student_rationale(sid)]
             for qid in question_ids:
                 max_pts = float(qmax_map.get(qid, 0.0) or 0.0)
                 pts = float(compute_total_by_display_id(self.grade_con, sid, qid) or 0.0)
