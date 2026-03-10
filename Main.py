@@ -4053,6 +4053,7 @@ class App:
         ttk.Button(top, text="Refresh Summary", command=self.refresh_summary).pack(side=tk.LEFT)
         ttk.Button(top, text="Export Grade (selected student)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Export This Student PDF", command=self.export_student_pdf).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Export All Rationales", command=self.export_all_rationales).pack(side=tk.LEFT, padx=6)
 
         self.summary_stats_lbl = ttk.Label(top, text="", style="Pastel.TLabel")
         self.summary_stats_lbl.pack(side=tk.RIGHT)
@@ -4067,7 +4068,7 @@ class App:
 
         note = ttk.Label(
             self.tab_summary,
-            text="Summary includes only students marked as included. The table shows rubric points, per-question totals, and overall totals.",
+            text="Summary includes only students marked as included. The table shows rubric points, per-question totals, and overall totals. Use \"Export All Rationales\" to save every student's feedback into one spreadsheet.",
             style="Pastel.TLabel"
         )
         note.pack(anchor="w", pady=(8,0))
