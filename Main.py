@@ -3561,6 +3561,7 @@ class App:
         rationale_btns.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         ttk.Button(rationale_btns, text="Regenerate Rationale (question)", command=self.regenerate_rationale_for_question).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(rationale_btns, text="Regenerate Rationale (all questions)", command=self.regenerate_rationale_for_all_questions).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(rationale_btns, text="Regenerate Rationale (FULL all students)", command=self.regenerate_rationale_for_all_students).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(rationale_btns, text="Regenerate Notes (question)", command=self.regenerate_notes_for_question).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(rationale_btns, text="Regenerate Notes (all questions)", command=self.regenerate_notes_for_all_questions).pack(side=tk.LEFT)
 
@@ -5351,13 +5352,7 @@ class App:
         if not qids:
             messagebox.showinfo("Missing", "Load a rubric scheme first.")
             return
-        rows = self.sub_con.execute("""
-            SELECT student_id
-            FROM students
-            WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
-            ORDER BY student_id
-        """).fetchall()
-        student_ids = [r[0] for r in rows if r and r[0]]
+        student_ids = self._included_student_ids()
         if not student_ids:
             messagebox.showinfo("Missing", "No included students found.")
             return
@@ -5945,16 +5940,56 @@ class App:
 
 
 
-    def _generate_feedback_without_regrading(self, qid: str, include_rationale: bool, include_notes: bool):
-        if not qid or not self.selected_student_id:
+    def _build_feedback_context_bundle(self, student_id: str, qid: str, cols: list[tuple], merged_code: str) -> str:
+        student_row = self.sub_con.execute(
+            "SELECT COALESCE(student_name,''), COALESCE(lab_id,'') FROM students WHERE student_id=?",
+            (student_id,),
+        ).fetchone()
+        student_name = (student_row[0] or "").strip() if student_row else ""
+        lab_id = (student_row[1] or "").strip() if student_row else ""
+        current_scores, current_notes = load_student_scores(self.grade_con, student_id, qid)
+        note_row = load_student_note(self.grade_con, student_id, qid)
+        current_rationale = ((note_row[0] if note_row else "") or "").strip()
+
+        rubric_snapshot = []
+        for col_key, group, col_text, mx in cols:
+            rubric_snapshot.append({
+                "col_key": col_key,
+                "group": group or "",
+                "criterion": col_text,
+                "max_points": float(mx),
+                "current_points": current_scores.get(col_key),
+                "current_note": (current_notes.get(col_key) or ""),
+            })
+
+        payload = {
+            "student": {
+                "student_id": student_id,
+                "student_name": student_name,
+                "lab_id": lab_id,
+            },
+            "question": {
+                "id": qid,
+                "title": (self.question_map.get(qid, qid) or qid),
+            },
+            "rubric": rubric_snapshot,
+            "current_rationale": current_rationale,
+            "code": merged_code,
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    def _generate_feedback_without_regrading(self, qid: str, include_rationale: bool, include_notes: bool, student_id: str | None = None):
+        sid = student_id or self.selected_student_id
+        if not qid or not sid:
             return
         cols = fetch_columns_for_question(self.grade_con, qid)
         if not cols:
             return
         rubric_items = [{"col_key": col_key, "group": (group or ""), "criterion": text, "min_points": 0.0, "max_points": float(mx)}
                         for col_key, group, text, mx in cols]
-        merged_code = merge_student_code(self.sub_con, self.selected_student_id)
-        theme = self._current_theme_instructions()
+        merged_code = merge_student_code(self.sub_con, sid)
+        context_bundle = self._build_feedback_context_bundle(sid, qid, cols, merged_code)
+        theme = self._current_theme_instructions() + "\n\nUse this grading context bundle (JSON) for evidence-grounded rationale and notes:\n" + context_bundle
 
         self._refresh_gpt_client()
         res = self.auto_grader.auto_grade(
@@ -5970,17 +6005,26 @@ class App:
         note_map = {x.get("col_key"): (x.get("note", "") or "") for x in res.get("scores", []) if x.get("col_key")}
         with self.grade_con:
             if include_notes:
-                score_map_existing, _ = load_student_scores(self.grade_con, self.selected_student_id, qid)
+                score_map_existing, _ = load_student_scores(self.grade_con, sid, qid)
                 for col_key, _group, _text, mx in cols:
                     pts = score_map_existing.get(col_key)
                     if pts is not None:
                         pts = clamp_points(float(pts), float(mx))
-                    upsert_score(self.grade_con, self.selected_student_id, qid, col_key, pts, note_map.get(col_key, ""), commit=False)
+                    upsert_score(self.grade_con, sid, qid, col_key, pts, note_map.get(col_key, ""), commit=False)
 
             if include_rationale:
                 rationale = (res.get("rationale") or "").strip()
-                total = compute_total(self.grade_con, self.selected_student_id, qid)
-                upsert_student_note(self.grade_con, self.selected_student_id, qid, rationale, overall_grade=total, commit=False)
+                total = compute_total(self.grade_con, sid, qid)
+                upsert_student_note(self.grade_con, sid, qid, rationale, overall_grade=total, commit=False)
+
+    def _included_student_ids(self) -> list[str]:
+        rows = self.sub_con.execute("""
+            SELECT student_id
+            FROM students
+            WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
+            ORDER BY student_id
+        """).fetchall()
+        return [r[0] for r in rows if r and r[0]]
 
     def _refresh_feedback_for_scope(self, include_rationale: bool, include_notes: bool, all_questions: bool):
         if not self.require_grading_db():
@@ -6022,6 +6066,41 @@ class App:
 
     def regenerate_rationale_for_all_questions(self):
         self._refresh_feedback_for_scope(include_rationale=True, include_notes=False, all_questions=True)
+
+    def regenerate_rationale_for_all_students(self):
+        if not self.require_grading_db():
+            return
+        display_ids = self._display_question_ids()
+        qids = [members[0] for members in (self._question_member_ids(dq) for dq in display_ids) if members]
+        if not qids:
+            messagebox.showinfo("Missing", "Load a rubric scheme first.")
+            return
+
+        student_ids = self._included_student_ids()
+        if not student_ids:
+            messagebox.showinfo("Missing", "No included students found.")
+            return
+
+        failed = []
+        for sid in student_ids:
+            for qid in qids:
+                try:
+                    self._generate_feedback_without_regrading(
+                        qid,
+                        include_rationale=True,
+                        include_notes=False,
+                        student_id=sid,
+                    )
+                except Exception as exc:
+                    failed.append(f"{sid}/{qid}: {exc}")
+
+        self.load_student_question_view()
+        self.refresh_summary()
+        self.refresh_progress_tab()
+        if failed:
+            messagebox.showwarning("Done with warnings", "Regenerated rationale for all students with some errors:\n" + "\n".join(failed[:8]))
+        else:
+            messagebox.showinfo("Done", f"Regenerated rationale for {len(student_ids)} students across {len(qids)} questions.")
 
     def regenerate_notes_for_question(self):
         self._refresh_feedback_for_scope(include_rationale=False, include_notes=True, all_questions=False)
