@@ -4094,7 +4094,7 @@ class App:
 
         ttk.Label(
             self.tab_grade_list,
-            text="Columns show per-question percentages. Click a cell to copy name, id, or grade.",
+            text="Columns show per-question rationales, combined rationale, and per-question percentages. Click any cell to copy it.",
             style="Pastel.TLabel",
         ).pack(anchor="w", pady=(8, 0))
 
@@ -5814,6 +5814,33 @@ class App:
                 return rationale.strip()
         return ""
 
+    def _get_student_rationale_by_display_qid(self, student_id: str, display_qid: str) -> str:
+        if not self.grade_con or not student_id or not display_qid:
+            return ""
+        row = self.grade_con.execute("""
+          SELECT COALESCE(sn.rationale, '')
+          FROM student_notes sn
+          JOIN rubric_questions rq ON rq.question_id = sn.question_id
+          WHERE sn.student_id=?
+            AND COALESCE(NULLIF(TRIM(rq.sub_id),''), rq.question_id)=?
+          ORDER BY sn.question_id
+        """, (student_id, display_qid)).fetchall()
+        for item in row:
+            text = ((item[0] if item else "") or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _get_combined_student_rationale(self, student_id: str, display_qids: list[str]) -> str:
+        if not display_qids:
+            return ""
+        bits = []
+        for qid in display_qids:
+            r = self._get_student_rationale_by_display_qid(student_id, qid)
+            if r:
+                bits.append(f"{qid}: {r}")
+        return "\n\n".join(bits)
+
     def _format_display_question_totals(self, student_id: str) -> str:
         if not self.grade_con or not student_id:
             return "By Question ID: -"
@@ -6289,12 +6316,19 @@ class App:
             return
 
         question_ids = fetch_display_question_ids(self.grade_con)
-        cols = ["student_id", "student_name", "rationale"] + [f"{qid}_pct" for qid in question_ids]
+        rationale_cols = [f"{qid}_rationale" for qid in question_ids]
+        cols = ["student_id", "student_name"] + rationale_cols + ["combined_rationale"] + [f"{qid}_pct" for qid in question_ids]
         self.grade_list_tree.configure(columns=cols)
 
         for c in cols:
             self.grade_list_tree.heading(c, text=c)
-            self.grade_list_tree.column(c, width=130 if c != "student_name" else 220, anchor="w")
+            if c == "student_name":
+                width = 220
+            elif c.endswith("_rationale") or c == "combined_rationale":
+                width = 360
+            else:
+                width = 130
+            self.grade_list_tree.column(c, width=width, anchor="w")
 
         students = self.sub_con.execute("""
           SELECT student_id, student_name
@@ -6307,7 +6341,8 @@ class App:
         for sid, sname in students:
             if not has_required_student_fields(sid, sname):
                 continue
-            row = [sid, sname, self._get_single_student_rationale(sid)]
+            per_q_rationales = [self._get_student_rationale_by_display_qid(sid, qid) for qid in question_ids]
+            row = [sid, sname] + per_q_rationales + [self._get_combined_student_rationale(sid, question_ids)]
             for qid in question_ids:
                 max_pts = float(qmax_map.get(qid, 0.0) or 0.0)
                 pts = float(compute_total_by_display_id(self.grade_con, sid, qid) or 0.0)
