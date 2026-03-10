@@ -4077,6 +4077,7 @@ class App:
         top.pack(fill=tk.X)
 
         ttk.Button(top, text="Refresh Grades List", command=self.refresh_grade_list_tab).pack(side=tk.LEFT)
+        ttk.Button(top, text="Export All Rationales", command=self.export_all_rationales).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(top, textvariable=self.grade_list_copy_var, style="Pastel.TLabel").pack(side=tk.LEFT, padx=10)
 
         self.grade_list_tree = ttk.Treeview(
@@ -6354,6 +6355,50 @@ class App:
             self.grade_list_tree.insert("", "end", values=row)
 
         self.grade_list_copy_var.set("Click any cell to copy its value.")
+
+    def export_all_rationales(self):
+        if not self.require_grading_db():
+            return
+
+        out = filedialog.asksaveasfilename(
+            title="Export all student rationales",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx")],
+        )
+        if not out:
+            return
+
+        question_ids = fetch_display_question_ids(self.grade_con)
+        headers = ["Student Number", "Student Name"] + [f"{qid}_rationale" for qid in question_ids] + ["combined_rationale"]
+
+        students = self.sub_con.execute("""
+          SELECT student_id, student_name
+          FROM students
+          WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
+          ORDER BY student_id
+        """).fetchall()
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "All_Rationales"
+        ws.append(headers)
+
+        for sid, sname in students:
+            if not has_required_student_fields(sid, sname):
+                continue
+            per_q_rationales = [self._get_student_rationale_by_display_qid(sid, qid) for qid in question_ids]
+            combined = self._get_combined_student_rationale(sid, question_ids)
+            ws.append([sid, sname, *per_q_rationales, combined])
+
+        for col in ws.columns:
+            try:
+                width = max(len(str(cell.value or "")) for cell in col)
+            except Exception:
+                width = 16
+            ws.column_dimensions[col[0].column_letter].width = min(60, max(16, width + 2))
+
+        wb.save(Path(out))
+        messagebox.showinfo("Exported", f"Saved rationale table:\n{out}")
 
     def refresh_summary(self):
         if self.grade_con is None:
