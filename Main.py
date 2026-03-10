@@ -1767,6 +1767,110 @@ class PDFExporter:
 
         doc.build(story)
 
+    def export_all_rationales_pdf(self, out_path: Path):
+        if SimpleDocTemplate is None:
+            raise RuntimeError("reportlab not installed. Install: pip install reportlab")
+
+        styles = getSampleStyleSheet()
+        title_style = styles["Title"]
+        heading_style = styles["Heading2"]
+        section_style = styles["Heading3"]
+        normal_style = styles["Normal"]
+        code_style = styles["Code"].clone("all_rationales_code")
+        code_style.fontSize = 7
+        code_style.leading = 8
+
+        doc = SimpleDocTemplate(str(out_path), pagesize=letter, title="All Rationales")
+        story = [
+            Paragraph("<b>All Student Rationales</b>", title_style),
+            Spacer(1, 8),
+            Paragraph("Single PDF export with each student's ID, rationale text, and source code.", normal_style),
+            Spacer(1, 12),
+        ]
+
+        question_ids = fetch_display_question_ids(self.grade_con)
+        students = self.sub_con.execute(
+            """
+            SELECT student_id, student_name
+            FROM students
+            WHERE LOWER(student_id) <> 'full' AND COALESCE(included,1)=1
+            ORDER BY student_id
+            """
+        ).fetchall()
+
+        def _rationale_for_display_qid(student_id: str, display_qid: str) -> str:
+            rows = self.grade_con.execute(
+                """
+                SELECT COALESCE(sn.rationale, '')
+                FROM student_notes sn
+                JOIN rubric_questions rq ON rq.question_id = sn.question_id
+                WHERE sn.student_id=?
+                  AND COALESCE(NULLIF(TRIM(rq.sub_id),''), rq.question_id)=?
+                ORDER BY sn.question_id
+                """,
+                (student_id, display_qid),
+            ).fetchall()
+            for item in rows:
+                txt = ((item[0] if item else "") or "").strip()
+                if txt:
+                    return txt
+            return ""
+
+        for idx, (sid, sname) in enumerate(students):
+            if not has_required_student_fields(sid, sname):
+                continue
+
+            if idx > 0:
+                story.append(PageBreak())
+
+            story.append(Paragraph(f"<b>{sid}</b> — {self._escape_pdf_text(sname)}", heading_style))
+            story.append(Spacer(1, 6))
+
+            rationale_rows = [["Question", "Rationale"]]
+            for qid in question_ids:
+                rationale_text = _rationale_for_display_qid(sid, qid) or "(no rationale)"
+                rationale_rows.append([
+                    Paragraph(self._escape_pdf_text(qid), normal_style),
+                    Paragraph(self._escape_pdf_text(rationale_text).replace("\n", "<br/>"), normal_style),
+                ])
+
+            rationale_tbl = Table(rationale_rows, colWidths=[90, 430], repeatRows=1)
+            rationale_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EFE5FF")),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]))
+            story.append(rationale_tbl)
+            story.append(Spacer(1, 10))
+
+            story.append(Paragraph("Student Code", section_style))
+            files = get_student_files(self.sub_con, sid)
+            if not files:
+                story.append(Paragraph("(No files found)", normal_style))
+                continue
+
+            for file_path in files:
+                code = get_file_content(self.sub_con, file_path)
+                if code is None:
+                    try:
+                        code = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+                    except Exception:
+                        code = ""
+                story.append(Spacer(1, 6))
+                story.append(Paragraph(self._escape_pdf_text(Path(file_path).name), normal_style))
+                lines = code.splitlines() or [""]
+                rendered = []
+                for line_no, text in enumerate(lines, start=1):
+                    rendered.append(f"{line_no:04d} | {self._escape_pdf_text(text)}")
+                story.append(Preformatted("\n".join(rendered), code_style))
+
+        doc.build(story)
+
     def export_all_students_pdfs(self, out_dir: Path, report_tag: str = "Midterm", progress_cb=None):
         out_dir.mkdir(parents=True, exist_ok=True)
         students = self.sub_con.execute("""
@@ -4054,6 +4158,7 @@ class App:
         ttk.Button(top, text="Export Grade (selected student)", command=self.export_selected_excel).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Export This Student PDF", command=self.export_student_pdf).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Export All Rationales", command=self.export_all_rationales).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Export All Rationales PDF", command=self.export_all_rationales_pdf).pack(side=tk.LEFT, padx=6)
 
         self.summary_stats_lbl = ttk.Label(top, text="", style="Pastel.TLabel")
         self.summary_stats_lbl.pack(side=tk.RIGHT)
@@ -4079,6 +4184,7 @@ class App:
 
         ttk.Button(top, text="Refresh Grades List", command=self.refresh_grade_list_tab).pack(side=tk.LEFT)
         ttk.Button(top, text="Export All Rationales", command=self.export_all_rationales).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(top, text="Export All Rationales PDF", command=self.export_all_rationales_pdf).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(top, textvariable=self.grade_list_copy_var, style="Pastel.TLabel").pack(side=tk.LEFT, padx=10)
 
         self.grade_list_tree = ttk.Treeview(
@@ -6400,6 +6506,29 @@ class App:
 
         wb.save(Path(out))
         messagebox.showinfo("Exported", f"Saved rationale table:\n{out}")
+
+    def export_all_rationales_pdf(self):
+        if not self.require_grading_db():
+            return
+        if SimpleDocTemplate is None:
+            messagebox.showinfo("PDF missing", "reportlab not installed. Install: pip install reportlab")
+            return
+
+        out = filedialog.asksaveasfilename(
+            title="Export all student rationales PDF",
+            defaultextension=".pdf",
+            filetypes=[("PDF", "*.pdf")],
+        )
+        if not out:
+            return
+
+        exporter = PDFExporter(self.sub_con, self.grade_con, self.question_map, self._student_pdf_options())
+        try:
+            exporter.export_all_rationales_pdf(Path(out))
+        except Exception as e:
+            messagebox.showerror("PDF export failed", str(e))
+            return
+        messagebox.showinfo("PDF exported", f"Saved:\n{out}")
 
     def refresh_summary(self):
         if self.grade_con is None:
